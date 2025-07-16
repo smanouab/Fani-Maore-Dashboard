@@ -1,6 +1,6 @@
 # 🌋 Fani Maoré - Surveillance Sismique Dashboard
 
-Solym M. Manou-Abi, Said Said Hachim, Sophie Dabo-Niang, Jean-Berky Nguala. A Comparative Study for Clustering Methods using KL Divergence, Rao distance, and Bregman divergence with Fani Maoré marine volcano earthquake Data. (2024) Under revision.
+Solym M. Manou-Abi, Said Said Hachim, Sophie Dabo-Niang, Jean-Berky Nguala. A  statistical learning of Fani Maoré marine volcano earthquake Data. (2024) Under revision.
 ## 📋 Description
 
 Dashboard interactif dédié à l'analyse de l'activité sismique du **volcan sous-marin Fani Maoré** situé à Mayotte. Cette application permet d'analyser, visualiser et comprendre les patterns sismiques de ce système volcanique actif depuis 2018.
