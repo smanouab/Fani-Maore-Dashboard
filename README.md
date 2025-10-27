@@ -1,7 +1,7 @@
 # 🌋 Fani Maoré - Surveillance Sismique Dashboard
 
 For more details: 
-Solym M. Manou-Abi, Said Said Hachim, Sophie Dabo-Niang, Jean-Berky Nguala. A  statistical learning of Fani Maoré marine volcano earthquake Data. (2024) Under revision. https://hal.science/hal-04224285v1
+Solym M. Manou-Abi, Said Said Hachim, Sophie Dabo-Niang, Jean-Berky Nguala. A  statistical learning of Fani Maoré marine volcano earthquake Data. (Preprint 2024). https://hal.science/hal-04224285v1
 
 ## 📋 Description
 
