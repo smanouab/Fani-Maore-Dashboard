@@ -5,7 +5,7 @@ Solym M. Manou-Abi, Said Said Hachim, Sophie Dabo-Niang. Spatio-Temporal Modelin
 
 ## 📋 Description
 
-Dashboard interactif dédié à l'analyse de l'activité sismique du **volcan sous-marin Fani Maoré** situé à Mayotte. Cette application permet d'analyser, visualiser et comprendre les patterns sismiques de ce système volcanique actif depuis 2018.
+Dashboard interactif en Python dédié à l'analyse de l'activité sismique du **volcan sous-marin Fani Maoré** situé à Mayotte. Cette application permet d'analyser, visualiser et comprendre les patterns sismiques de ce système volcanique actif depuis 2018.
 
 ## 🚀 Accès Direct à l'Application
 
