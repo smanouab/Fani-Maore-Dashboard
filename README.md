@@ -1,202 +1,244 @@
-# 🌋 Fani Maoré - Surveillance Sismique Dashboard
+# 🌋 Fani Maoré – Seismic Monitoring Dashboard
 
-For more details: 
-Solym M. Manou-Abi, Said Said Hachim, Sophie Dabo-Niang. Spatio-Temporal Modeling of the Fani Maoré marine volcano earthquake Data. (Preprint 2025)
+**Scientific reference:**  
+Solym M. Manou-Abi and Said Said Hachim. *Spatio-Temporal Modeling of the Fani Maoré Marine Volcano Earthquake Data*. Preprint, 2025.
 
 ## 📋 Description
 
-Dashboard interactif en Python dédié à l'analyse de l'activité sismique du **volcan sous-marin Fani Maoré** situé à Mayotte. Cette application permet d'analyser, visualiser et comprendre les patterns sismiques de ce système volcanique actif depuis 2018.
+An interactive Python-based dashboard dedicated to the analysis of seismic activity associated with the **Fani Maoré submarine volcano**, located off the coast of Mayotte in the Indian Ocean.
 
-## 🚀 Accès Direct à l'Application
+This application provides tools to explore, analyze, and visualize seismic patterns associated with this active volcanic system, which has been monitored since 2018.
 
-**[👉 Lancer le Dashboard Fani Maoré](https://seismic-dashboard-final.streamlit.app/)** 
+## 🚀 Access the Dashboard
 
-## 🌋 À propos du Volcan Fani Maoré
+**[👉 Launch the Fani Maoré Seismic Monitoring Dashboard](https://seismic-dashboard-final.streamlit.app/)**
 
-- **📍 Localisation**: 50 km à l'est de Mayotte, Océan Indien
-- **🌊 Type**: Volcan sous-marin basaltique  
-- **📅 Activité**: Essaim sismique depuis mai 2018
-- **📡 Surveillance**: Réseau REVOSIMA (15 stations sismiques)
-- **📊 Données**: 15,407+ événements sismiques analysés
-- **🌊 Profondeur**: Édifice volcanique à 3500m sous le niveau de la mer
+## 🌋 About the Fani Maoré Volcano
 
-## ✨ Fonctionnalités du Dashboard
+- **📍 Location:** Approximately 50 km east of Mayotte, Indian Ocean
+- **🌊 Type:** Submarine basaltic volcano
+- **📅 Activity:** Seismic swarm ongoing since May 2018
+- **📡 Monitoring:** REVOSIMA monitoring network (15 seismic stations)
+- **📊 Dataset:** More than 15,407 seismic events analyzed
+- **🌊 Depth:** Volcanic edifice located approximately 3,500 m below sea level
 
-### 📊 Analyses Disponibles
-- **🏠 Vue d'Ensemble** : Métriques clés et contexte volcanique
-- **📊 Analyse Générale** : Statistiques globales et distributions
-- **🔬 Analyse des Caractéristiques** : Magnitudes, profondeurs, énergie libérée
-- **📈 Analyse des Tendances** : Patterns temporels et cycles saisonniers
-- **🗺️ Analyse Spatio-Temporelle** : Cartographie interactive de la zone
+## ✨ Dashboard Features
 
-### 🔍 Filtres Interactifs
-- **📅 Période d'analyse**: 2018-2024
-- **⚡ Plage de magnitude**: 0.1 - 5.8
-- **🕳️ Profondeur**: 0 - 50+ km
-- **🌿 Filtres saisonniers**: Par mois, saison, jour de la semaine
+### 📊 Available Analyses
 
-### 📈 Visualisations Avancées
-- **🗺️ Cartes interactives** avec localisation précise des séismes
-- **📊 Heatmaps** de densité et d'activité temporelle
-- **📈 Graphiques temporels** avec tendances et régressions
-- **⚡ Distribution des énergies** et potentiel destructeur
-- **🔄 Analyse des cycles** et périodicités
+- **🏠 Overview:** Key indicators and geological context of the volcanic system.
+- **📊 General Analysis:** Global statistics and distributions of seismic events.
+- **🔬 Seismic Characteristics:** Analysis of magnitudes, depths, and released energy.
+- **📈 Trend Analysis:** Temporal patterns, long-term trends, and seasonal cycles.
+- **🗺️ Spatio-Temporal Analysis:** Interactive mapping and exploration of seismic activity across the study area.
 
-## 🚀 Installation Locale (Développeurs)
+### 🔍 Interactive Filters
 
-### Prérequis
-- Python 3.8 ou plus récent
-- pip (gestionnaire de packages Python)
+- **📅 Analysis period:** 2018–2024.
+- **⚡ Magnitude range:** 0.1–5.8.
+- **🕳️ Depth range:** 0–50+ km.
+- **🌿 Seasonal filters:** Month, season, and day of the week.
 
-### Installation
+### 📈 Advanced Visualizations
+
+- **🗺️ Interactive maps** displaying the geographical locations of seismic events.
+- **📊 Heatmaps** illustrating seismic density and temporal activity.
+- **📈 Time-series plots** with trend analysis and regression models.
+- **⚡ Energy distribution analysis** and indicators of potential seismic impact.
+- **🔄 Cyclic behavior and periodicity analysis.**
+
+## 🚀 Local Installation (Developers)
+
+### Requirements
+
+- Python 3.8 or later
+- pip (Python package manager)
+
+### Installation Instructions
+
 ```bash
-# Cloner le repository
+# Clone the repository
 git clone https://github.com/YOUR-USERNAME/seismic-dashboard.git
 cd seismic-dashboard
 
-# Installer les dépendances
+# Install dependencies
 pip install -r requirements.txt
 
-# Lancer l'application
+# Run the application
 streamlit run app_minimal.py
 ```
 
-## 📁 Structure du Projet
+## 📁 Project Structure
 
-```
+```text
 seismic-dashboard/
-├── app_minimal.py                   # Application principale Fani Maoré
-├── requirements.txt                 # Dépendances Python
-├── README.md                       # Documentation
-├── pages/                          # Modules d'analyse
-│   ├── Analyse_generale.py         # Analyse générale
-│   ├── Analyse_caracteristiques_sismique.py # Caractéristiques physiques
-│   ├── Analyse_tendances_sismique.py # Tendances temporelles
-│   └── Analyse_spatio_temporelle.py # Analyse spatiale
-├── utils/                          # Fonctions utilitaires
-│   ├── data_loader.py             # Chargement des données
-│   ├── data_collector.py          # Collecte de données
-│   └── settings.py                # Configuration
-├── data/                          # Données sismiques
-│   ├── NewDataseisme.csv          # Base de données Fani Maoré
-│   ├── backup/                    # Sauvegardes
-│   └── logs/                      # Journaux
-└── config/                        # Configuration
-    └── settings.py                # Paramètres
+├── app_minimal.py                   # Main Fani Maoré dashboard
+├── requirements.txt                 # Python dependencies
+├── README.md                         # Project documentation
+├── pages/                            # Analysis modules
+│   ├── Analyse_generale.py           # General analysis
+│   ├── Analyse_caracteristiques_sismique.py
+│   │                                  # Seismic characteristics
+│   ├── Analyse_tendances_sismique.py # Temporal trends
+│   └── Analyse_spatio_temporelle.py  # Spatial analysis
+├── utils/                            # Utility functions
+│   ├── data_loader.py                # Data loading
+│   ├── data_collector.py              # Data collection
+│   └── settings.py                    # Configuration
+├── data/                              # Seismic datasets
+│   ├── NewDataseisme.csv              # Fani Maoré seismic database
+│   ├── backup/                        # Data backups
+│   └── logs/                          # Application logs
+└── config/                            # Configuration files
+    └── settings.py
 ```
 
-## 📊 Données Sismiques
+## 📊 Seismic Data
 
-### Source des Données
-- **Réseau REVOSIMA** (Réseau de surveillance VOlcanique et SIsmique de MAyotte)
-- **IPGP** (Institut de Physique du Globe de Paris)
-- **BRGM** (Bureau de Recherches Géologiques et Minières)
+### Data Sources
 
-### Format des Données: `NewDataseisme.csv`
+The seismic dataset is based on information provided by the following institutions and monitoring networks:
+
+- **REVOSIMA:** Mayotte Volcanological and Seismological Monitoring Network (*Réseau de surveillance volcanologique et sismologique de Mayotte*).
+- **IPGP:** Institut de Physique du Globe de Paris.
+- **BRGM:** French Geological Survey (*Bureau de Recherches Géologiques et Minières*).
+
+### Data Format: `NewDataseisme.csv`
+
 ```csv
-Date,Magnitude,Latitude,Longitude,Profondeur,Annee,Mois,Jour,Heure
+Date,Magnitude,Latitude,Longitude,Depth,Year,Month,Day,Hour
 10/05/2018 14:15,4.2,-12.8456,45.5123,25.3,2018,5,10,14
 ```
 
-**Colonnes principales:**
-- `Date` : Date et heure UTC du séisme
-- `Magnitude` : Magnitude locale (ML)
-- `Latitude/Longitude` : Coordonnées géographiques
-- `Profondeur` : Profondeur hypocentrale (km)
+**Main variables:**
 
-## 🗺️ Zone d'Étude
+- `Date`: Date and time of the seismic event (UTC).
+- `Magnitude`: Local magnitude (ML).
+- `Latitude/Longitude`: Geographic coordinates of the seismic event.
+- `Depth`: Hypocentral depth (km).
 
-### Contexte Géologique
-- **Zone de surveillance**: Région est de Mayotte
-- **Système volcanique**: Fani Maoré (découvert en 2019)
-- **Contexte tectonique**: Rift de Madagascar - Comores
-- **Phénomène**: Plus grand essaim sismique enregistré à Mayotte
+## 🗺️ Study Area
 
-### Points d'Intérêt
-- **🌋 Volcan Fani Maoré**: Édifice principal
-- **🏝️ Mayotte**: Référence géographique
-- **📡 Stations REVOSIMA**: Réseau de surveillance
+### Geological Context
 
-## 🔧 Fonctionnalités Techniques
+- **Monitoring area:** Eastern region of Mayotte.
+- **Volcanic system:** Fani Maoré submarine volcano, discovered in 2019.
+- **Tectonic setting:** Madagascar–Comoros region.
+- **Geological phenomenon:** The largest seismic swarm recorded in the Mayotte region.
 
-### Calculs Scientifiques
-- **⚡ Énergie libérée**: E = 10^(1.5×M + 4.8)
-- **💥 Potentiel destructeur**: Magnitude × (1 + 70/profondeur)
-- **📊 Loi de Gutenberg-Richter**: Distribution magnitude-fréquence
-- **📈 Tests statistiques**: Chi², corrélations, tendances
+### Key Geographical Features
 
-### Visualisations Cartographiques
-- **🗺️ Cartes Folium interactives**
-- **🔥 Heatmaps de densité**
-- **📍 Clustering des événements**
-- **📏 Calcul de distances** depuis Fani Maoré
+- **🌋 Fani Maoré Volcano:** Main volcanic edifice.
+- **🏝️ Mayotte:** Geographical reference point.
+- **📡 REVOSIMA Stations:** Seismic monitoring network.
 
-## 📈 Analyses Disponibles
+## 🔧 Technical Features
 
-### 1. 🏠 Vue d'Ensemble
-- Métriques clés du volcan Fani Maoré
-- Contexte géologique et volcanique
-- Statistiques générales de l'activité
+### Scientific Computations
 
-### 2. 📊 Analyse Générale  
-- Distribution globale des événements
-- Évolution temporelle de l'activité
-- Comparaisons inter-annuelles
+The dashboard incorporates several quantitative methods and statistical indicators:
 
-### 3. 🔬 Caractéristiques Sismiques
-- Distribution des magnitudes et profondeurs
-- Relation magnitude-profondeur
-- Calcul du potentiel destructeur
-- Analyse de l'énergie libérée
+- **⚡ Released seismic energy:**
 
-### 4. 📈 Tendances Temporelles
-- Cycles saisonniers et hebdomadaires
-- Tendances à long terme
-- Analyse des périodicités
-- Tests de significativité statistique
+  \[
+  E = 10^{1.5M+4.8}
+  \]
 
-### 5. 🗺️ Analyse Spatio-Temporelle
-- Cartographie de l'activité sismique
-- Évolution spatiale dans le temps
-- Distance aux points d'intérêt
-- Clustering géographique
+- **💥 Potential impact indicator:** A magnitude- and depth-based indicator:
 
-## 🌊 Impact et Surveillance
+  \[
+  I = M\left(1+\frac{70}{d}\right)
+  \]
 
-### Importance Scientifique
-- **Premier volcan sous-marin** surveillé en temps réel à Mayotte
-- **Phénomène géologique majeur** de l'océan Indien occidental
-- **Déformation du sol** de plusieurs centimètres observée
-- **Création d'un nouvel édifice volcanique** de 800m de hauteur
+- **📊 Gutenberg–Richter law:** Analysis of the magnitude–frequency relationship.
+- **📈 Statistical tests:** Chi-square tests, correlation analysis, and trend detection.
 
-### Surveillance Continue
-- **Surveillance 24h/24, 7j/7** par le réseau REVOSIMA
-- **Alertes automatiques** pour les événements significatifs
-- **Modélisation** de l'évolution du système volcanique
-- **Évaluation des risques** pour la population de Mayotte
+### Mapping and Spatial Visualization
 
-## 🆘 Support et Documentation
+- **🗺️ Interactive Folium maps.**
+- **🔥 Seismic density heatmaps.**
+- **📍 Spatial clustering of seismic events.**
+- **📏 Distance calculations** from the Fani Maoré volcanic edifice.
 
-### En cas de problème
-1. Vérifiez la connectivité internet
-2. Consultez les logs d'erreur dans la console
-3. Redémarrez l'application
-4. Contactez l'équipe de développement
+## 📈 Detailed Analysis Modules
 
-### Ressources Scientifiques
-- [REVOSIMA - IPGP](http://revosima.ipgp.fr/)
-- [BRGM Mayotte](https://www.brgm.fr/)
-- [Observatoire Volcanologique du Piton de la Fournaise](http://www.ipgp.fr/fr/ovpf)
+### 1. 🏠 Overview
 
-## 📝 Historique des Versions
+- Key indicators of Fani Maoré volcanic activity.
+- Geological and volcanic background.
+- General statistics describing seismic activity.
 
-- **v1.0** (2024): Version initiale Fani Maoré
-- **v1.1** (2024): Ajout analyse des caractéristiques
-- **v1.2** (2024): Intégration cartographie avancée
-- **v1.3** (2025): Optimisation pour déploiement cloud
+### 2. 📊 General Seismic Analysis
+
+- Overall distribution of seismic events.
+- Temporal evolution of seismic activity.
+- Year-to-year comparisons.
+
+### 3. 🔬 Seismic Characteristics
+
+- Magnitude and depth distributions.
+- Magnitude–depth relationships.
+- Potential impact indicators.
+- Analysis of released seismic energy.
+
+### 4. 📈 Temporal Trend Analysis
+
+- Seasonal and weekly cycles.
+- Long-term temporal trends.
+- Periodicity analysis.
+- Statistical significance testing.
+
+### 5. 🗺️ Spatio-Temporal Analysis
+
+- Geographic mapping of seismic activity.
+- Spatial evolution of seismic events over time.
+- Distance analysis relative to key geographical locations.
+- Geographic clustering and spatial patterns.
+
+## 🌊 Scientific Impact and Monitoring
+
+### Scientific Significance
+
+- **First submarine volcanic system** monitored in real time in the Mayotte region.
+- **Major geological phenomenon** in the western Indian Ocean.
+- **Ground deformation:** Several centimeters of deformation have been observed.
+- **Formation of a new volcanic edifice:** Approximately 800 m in height.
+
+### Continuous Monitoring
+
+- **24/7 monitoring** through the REVOSIMA network.
+- **Automated alerts** for significant seismic events.
+- **Volcanic system modeling** to investigate its evolution.
+- **Risk assessment** to support the monitoring and protection of Mayotte's population.
+
+## 🆘 Support and Documentation
+
+### Troubleshooting
+
+If you encounter an issue while using the dashboard:
+
+1. Check your internet connection.
+2. Review error messages in the application console.
+3. Restart the application.
+4. Contact the development team.
+
+### Scientific Resources
+
+- [REVOSIMA – IPGP](http://revosima.ipgp.fr/)
+- [BRGM – French Geological Survey](https://www.brgm.fr/)
+- [Piton de la Fournaise Volcanological Observatory](http://www.ipgp.fr/fr/ovpf)
+
+## 📝 Version History
+
+- **v1.0 (2024):** Initial release of the Fani Maoré dashboard.
+- **v1.1 (2024):** Introduction of seismic characteristics analysis.
+- **v1.2 (2024):** Integration of advanced mapping functionalities.
+- **v1.3 (2025):** Optimization for cloud deployment.
 
 ---
 
-**🌋 Développé pour la surveillance du volcan Fani Maoré - Mayotte, Océan Indien**
+---
+
+**🌋 Developed for the statistical exploration, visualization, and spatio-temporal analysis of seismic activity associated with the Fani Maoré submarine volcano**
 
 *Application scientifique dédiée à la compréhension de l'activité sismique volcanique sous-marine*
