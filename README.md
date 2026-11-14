@@ -1,7 +1,7 @@
 # 🌋 Fani Maoré – Seismic Monitoring Dashboard
 
 **Scientific reference:**  
-Solym M. Manou-Abi and Said Said Hachim. *Spatio-Temporal Modeling of the Fani Maoré Marine Volcano Earthquake Data*. Preprint, 2025.
+Solym M. Manou-Abi and Said Said Hachim. *A Data-Driven and Scalable Computational Framework for Spatio-Temporal Modeling of Fani Maoré Seismicity*. Preprint, 2026.
 
 ## 📋 Description
 
