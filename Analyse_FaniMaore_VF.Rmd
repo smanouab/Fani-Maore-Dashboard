@@ -1,0 +1,802 @@
+---
+title: "Spatio-temporal analysis of the Fani Maoré seismicity — reproducible workflow (R)"
+author: "S. M. Manou-Abi, S. S. Hachim, S. Dabo-Niang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+# Toutes les figures sont enregistrées automatiquement dans figures_R/ (PNG et PDF, nommées d'après le bloc)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 4.5, dpi = 300,
+                      dev = c("png", "pdf"), fig.path = "figures_R/")
+```
+
+# Objet du notebook
+
+Ce notebook R reproduit les analyses du manuscrit révisé, étape par étape. Il utilise les **mêmes paramètres** que le notebook Python (`Analyse_FaniMaore_Python.ipynb`) et que les scripts `s1`–`s6`.
+
+| Étape | Contenu | Reviewer |
+|---|---|---|
+| 1 | Lecture du catalogue IPGP, diagnostic multi-observatoires | R2-C2, R1 |
+| 2 | Contrôle qualité : doublons, fenêtre, profondeurs | R2-C1 |
+| 3 | Magnitude de complétude $M_c(t)$ et valeur $b$ | R2-C1 |
+| 4 | Carte de la zone d'étude | R1 |
+| 5 | Clustering hypocentral K-means + stabilité | R2-C3 |
+| 6 | Holt–Winters / ETS : sélection AICc, évaluation hors échantillon | R2-C4, R1 |
+| 7 | Tests de saisonnalité et de cycle jour/nuit | R2-C4 |
+| 8 | Lisseur à noyau spatio-temporel, validation croisée par blocs | R2-C5 |
+| 9 | Estimateur à noyau récursif des marques (théorème, simulation, application) | section 3.5 |
+| 10 | Coût de calcul | R2-C6 |
+
+**Remarque sur la reproductibilité.** Les procédures sont identiques à celles de la version Python. En revanche, les générateurs aléatoires de R et de Python diffèrent : les quantités issues du bootstrap, des initialisations aléatoires ou des plis aléatoires peuvent donc varier à la deuxième décimale. Les quantités déterministes (contrôle qualité, $M_c$, tests GLM, CV par blocs) doivent coïncider. Les chiffres du manuscrit proviennent de la version Python.
+
+**Paquets requis :** `dplyr`, `ggplot2`, `cluster`, `sf`, `splines` (fourni avec R). Facultatifs : `patchwork` (assemblage des figures), `RANN` (KD-tree).
+
+**Figures.** Chaque figure est enregistrée automatiquement dans `figures_R/` en PNG (300 dpi) et en PDF. Les Figures 1, 3, 7, 10, 11 et 12 du manuscrit y sont en plus enregistrées sous leur numéro (`Figure1_map`, `Figure3_…`, etc.).
+
+**Fichiers attendus à côté de ce notebook :** `NewData-seisme.csv` et le shapefile complet `976_Commune.shp` (avec `.shx`, `.dbf`, `.prj`). À défaut de shapefile, `mayotte_outline.geojson` est utilisé.
+
+```{r packages}
+library(dplyr)
+library(ggplot2)
+library(cluster)
+library(splines)
+library(sf)
+set.seed(0)
+
+# Cherche un fichier dans le dossier du notebook, ses sous-dossiers usuels, puis les dossiers parents (3 niveaux)
+find_file <- function(name) {
+  roots <- getwd(); for (i in 1:3) roots <- c(roots, dirname(roots[length(roots)]))
+  for (r in roots) for (sub in c("", "data", "donnees", "code", "notebooks", "manuscrit", "resultats")) {
+    p <- file.path(r, sub, name); if (file.exists(p)) return(normalizePath(p))
+  }
+  NA_character_
+}
+
+# --- Catalogue : chargement habituel (fichier à côté du notebook), sinon recherche dans les dossiers voisins
+DATA <- "NewData-seisme.csv"
+if (!file.exists(DATA)) DATA <- find_file("NewData-seisme.csv")
+if (is.na(DATA)) stop("NewData-seisme.csv introuvable : placez-le dans ", getwd(), " ou donnez son chemin complet dans DATA.")
+cat("Catalogue :", normalizePath(DATA), "\n")
+
+OUT <- "out_R"; dir.create(OUT, showWarnings = FALSE)
+FIG <- "figures_R"; dir.create(FIG, showWarnings = FALSE)
+LAT0   <- -12.80; LON0 <- 45.50
+KX     <- 111.32 * cos(LAT0 * pi / 180); KY <- 110.57
+WINDOW <- list(lat = c(-13.30, -12.30), lon = c(44.90, 46.10))
+FANI   <- c(45.72, -12.90); MAMOUDZOU <- c(45.23, -12.78)
+UTC_OFFSET_H <- 3
+theme_set(theme_bw(base_size = 11))
+
+# --- Contour de Mayotte : même chargement que dans votre code d'origine
+SHP <- "976_Commune.shp"
+if (!file.exists(SHP) && !is.na(find_file(SHP))) SHP <- find_file(SHP)
+myt_contour_lonlat <- tryCatch({
+  myt_contour <- read_sf(SHP)
+  st_transform(myt_contour, "+proj=longlat +ellps=WGS84 +datum=WGS84") %>% st_union()
+}, error = function(e) { message("Shapefile non lu (", conditionMessage(e), ")"); NULL })
+if (is.null(myt_contour_lonlat)) {                       # secours : contour fourni en GeoJSON
+  gj <- find_file("mayotte_outline.geojson")
+  if (!is.na(gj)) myt_contour_lonlat <- tryCatch(st_union(st_make_valid(read_sf(gj))), error = function(e) NULL)
+}
+if (is.null(myt_contour_lonlat)) message("Aucun contour disponible : cartes tracées sans contour.") else cat("Contour de Mayotte chargé.\n")
+
+# Arrêt explicite si une matrice passée à kmeans() contient une valeur manquante
+check_finite <- function(X, label) {
+  bad <- colSums(!is.finite(as.matrix(X)))
+  if (any(bad > 0)) stop(label, " : valeurs manquantes ou infinies dans ", paste(names(bad)[bad > 0], bad[bad > 0], collapse = ", "))
+  invisible(TRUE)
+}
+```
+
+# Lecture du catalogue et diagnostic
+
+Le script de collecte interroge le service FDSN de l'IPGP **sans contrainte géographique**. Le fichier mélange donc les catalogues des Petites Antilles, de La Réunion et de Mayotte. Les décimales sont mixtes (`,` et `.`).
+
+```{r read}
+raw <- read.csv(DATA, sep = ";", colClasses = "character", fileEncoding = "UTF-8-BOM")
+names(raw) <- trimws(names(raw))
+num <- function(v) as.numeric(gsub(",", ".", trimws(v), fixed = TRUE))
+raw <- raw %>%
+  mutate(Magnitude = num(Magnitude), Latitude = num(Latitude), Longitude = num(Longitude),
+         Depth = num(Profondeur), time = as.POSIXct(Date, format = "%d/%m/%Y %H:%M", tz = "UTC"))
+region_of <- function(lat, lon) {
+  ifelse(lon < -50, "Lesser Antilles (OVSM/OVSG)",
+  ifelse(lon > 54 & lon < 57 & lat > -22.5 & lat < -19.5, "La Reunion (OVPF)",
+  ifelse(lon > 43 & lon < 48 & lat > -15 & lat < -10, "Mayotte (REVOSIMA)", "other")))
+}
+# Lignes incomplètes (valeur manquante, non numérique ou date illisible) : retirées et comptées.
+# Sans cela, kmeans() s'arrête avec "NA/NaN/Inf in foreign function call (arg 1)".
+ok_row <- is.finite(raw$Magnitude) & is.finite(raw$Latitude) & is.finite(raw$Longitude) & is.finite(raw$Depth) & !is.na(raw$time)
+cat(sum(!ok_row), "ligne(s) incomplète(s) retirée(s) sur", nrow(raw), "\n")
+raw <- raw[ok_row, ]
+print(colSums(is.na(raw[, c("Magnitude", "Latitude", "Longitude", "Depth", "time")])))   # doit afficher des zéros
+raw$region <- region_of(raw$Latitude, raw$Longitude)
+cat(nrow(raw), "événements, du", format(min(raw$time)), "au", format(max(raw$time)), "\n")
+raw %>% group_by(region) %>%
+  summarise(n = n(), first = min(time), last = max(time),
+            lat_min = min(Latitude), lat_max = max(Latitude), lon_min = min(Longitude), lon_max = max(Longitude),
+            depth_min = min(Depth), depth_max = max(Depth), M_max = max(Magnitude)) %>%
+  knitr::kable(digits = 2)
+```
+**Reproduction de l'analyse initiale :** un K-means à 3 classes sur les variables standardisées retrouve les observatoires, pas des essaims volcaniques.
+
+```{r diag}
+orig <- raw %>% filter(time <= as.POSIXct("2025-10-04", tz = "UTC"))
+Zo <- scale(orig[, c("Magnitude", "Depth", "Latitude", "Longitude")]); check_finite(Zo, "K-means du diagnostic")
+orig$cluster <- factor(kmeans(Zo, centers = 3, nstart = 10, iter.max = 100)$cluster)
+print(table(cluster = orig$cluster, region = orig$region))
+cat("Corrélation latitude-longitude (fichier mélangé) :", round(cor(raw$Latitude, raw$Longitude), 3), "\n")
+ggplot(orig, aes(Longitude, Latitude, colour = cluster)) + geom_point(size = .4) +
+  labs(x = "Longitude (°E)", y = "Latitude (°N)", title = "K-means on the unfiltered IPGP query")
+```
+
+# Contrôle qualité du sous-catalogue de Mayotte
+
+```{r qc}
+m <- raw %>% filter(region == "Mayotte (REVOSIMA)") %>% arrange(time)
+qc <- c("Mayotte region box" = nrow(m))
+m <- m %>% distinct(time, Latitude, Longitude, Depth, Magnitude, .keep_all = TRUE)
+qc["after exact duplicates"] <- nrow(m)
+m <- m %>% mutate(x_km = (Longitude - LON0) * KX, y_km = (Latitude - LAT0) * KY)
+
+# quasi-doublons : |dt| <= 1 min, distance < 5 km, |dM| < 0.3
+tmin <- as.numeric(m$time) / 60
+drop <- rep(FALSE, nrow(m))
+for (i in seq_len(nrow(m))) {
+  if (drop[i]) next
+  j <- i + 1
+  while (j <= nrow(m) && tmin[j] - tmin[i] <= 1) {
+    if (!drop[j] && sqrt((m$x_km[i] - m$x_km[j])^2 + (m$y_km[i] - m$y_km[j])^2) < 5 &&
+        abs(m$Magnitude[i] - m$Magnitude[j]) < 0.3) drop[j] <- TRUE
+    j <- j + 1
+  }
+}
+m <- m[!drop, ];                                   qc["after near-duplicates"] <- nrow(m)
+m <- m %>% filter(between(Latitude, WINDOW$lat[1], WINDOW$lat[2]), between(Longitude, WINDOW$lon[1], WINDOW$lon[2]))
+qc["after study window"] <- nrow(m)
+qc["negative depths removed"] <- sum(m$Depth < 0)
+m <- m %>% filter(Depth >= 0) %>% mutate(deep_flag = Depth > 60)
+qc["final catalogue"] <- nrow(m); qc["depth > 60 km (flagged)"] <- sum(m$deep_flag)
+knitr::kable(data.frame(step = names(qc), events = as.integer(qc)))
+```
+
+# Magnitude de complétude et valeur b
+
+* MAXC+0.2 : sur tout le catalogue, par semestre et dans des fenêtres glissantes de 400 événements (200 bootstraps).
+* $b$ par maximum de vraisemblance (Aki–Utsu), avec l'écart-type de Shi & Bolt.
+
+```{r mc}
+mc_maxc <- function(M, dm = 0.1, corr = 0.2) {
+  br <- seq(floor(min(M) * 10) / 10, max(M) + dm, by = dm)
+  h <- hist(M, breaks = br, plot = FALSE, right = FALSE)
+  br[which.max(h$counts)] + corr
+}
+b_aki <- function(M, mc) {
+  s <- M[M >= mc - 1e-9]; b <- log10(exp(1)) / (mean(s) - mc)
+  c(b = b, se = 2.3 * b^2 * sd(s) / sqrt(length(s)), n = length(s))
+}
+M <- m$Magnitude
+mc_global <- mc_maxc(M); bg <- b_aki(M, mc_global)
+cat(sprintf("MAXC+0.2 = %.2f ; b = %.3f ± %.3f (n = %d)\n", mc_global, bg["b"], bg["se"], bg["n"]))
+
+starts <- seq(1, nrow(m) - 400 + 1, by = 100)
+mcT <- do.call(rbind, lapply(starts, function(s0) {
+  Mw <- M[s0:(s0 + 399)]; boots <- replicate(200, mc_maxc(sample(Mw, 400, replace = TRUE)))
+  data.frame(t_mid = m$time[s0 + 200], Mc = mean(boots), sd = sd(boots))
+}))
+MC <- ceiling(max(mc_global, quantile(mcT$Mc, .95)) * 10) / 10
+cat(sprintf("Mc(t) entre %.2f et %.2f ; seuil retenu Mc = %.1f\n", min(mcT$Mc), max(mcT$Mc), MC))
+
+m$half <- paste0(format(m$time, "%Y"), "-H", ifelse(as.integer(format(m$time, "%m")) <= 6, 1, 2))
+m %>% group_by(half) %>% filter(n() >= 100) %>%
+  summarise(n = n(), Mc = mc_maxc(Magnitude), b = b_aki(Magnitude, mc_maxc(Magnitude))["b"]) %>% knitr::kable(digits = 2)
+
+ggplot(mcT, aes(t_mid, Mc)) + geom_ribbon(aes(ymin = Mc - sd, ymax = Mc + sd), alpha = .3) + geom_line() +
+  geom_hline(yintercept = MC, linetype = 2, colour = "red") + labs(x = NULL, y = "Mc (MAXC+0.2)", title = "Moving-window Mc(t)")
+
+cc <- m %>% filter(Magnitude >= MC)
+cat(nrow(cc), "événements avec M >=", MC, "\n")
+```
+
+# Carte de la zone d'étude (reviewer 1)
+
+Couleur = profondeur, taille = magnitude, coupe est–ouest. Le contour `myt_contour_lonlat` est chargé au début du notebook avec `read_sf("976_Commune.shp")`, comme dans votre code d'origine. La figure est enregistrée sous `figures_R/Figure1_map`.
+
+```{r map, fig.height=7}
+mm <- m %>% arrange(Magnitude)
+p_map <- ggplot()
+if (!is.null(myt_contour_lonlat)) p_map <- p_map + geom_sf(data = myt_contour_lonlat, fill = "grey75", colour = "black")
+coord_map <- if (!is.null(myt_contour_lonlat)) coord_sf(xlim = WINDOW$lon, ylim = WINDOW$lat) else
+  coord_cartesian(xlim = WINDOW$lon, ylim = WINDOW$lat)
+p_map <- p_map +
+  geom_point(data = mm, aes(Longitude, Latitude, colour = pmin(Depth, 70), size = Magnitude), alpha = .6) +
+  annotate("point", x = FANI[1], y = FANI[2], shape = 2, size = 4) +
+  annotate("text", x = FANI[1], y = FANI[2] + .04, label = "Fani Maoré", size = 3) +
+  annotate("point", x = MAMOUDZOU[1], y = MAMOUDZOU[2], shape = 15, size = 3) +
+  scale_colour_viridis_c(option = "plasma", direction = -1, name = "Depth (km)") +
+  scale_size_continuous(range = c(.2, 5), name = "Magnitude") +
+  coord_map + labs(x = "Longitude (°E)", y = "Latitude (°N)")
+p_sec <- ggplot(mm, aes(Longitude, Depth, colour = pmin(Depth, 70), size = Magnitude)) + geom_point(alpha = .6) +
+  scale_y_reverse(limits = c(80, -2)) + scale_colour_viridis_c(option = "plasma", direction = -1, guide = "none") +
+  scale_size_continuous(range = c(.2, 5), guide = "none") + labs(x = "Longitude (°E)", y = "Depth (km)")
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork); p1 <- p_map / p_sec + plot_layout(heights = c(2.2, 1)); print(p1)
+} else { p1 <- p_map; print(p_map); print(p_sec) }
+for (ext in c("png", "pdf")) ggsave(file.path(FIG, paste0("Figure1_map.", ext)), p1, width = 10, height = 8, dpi = 300)
+```
+
+# Clustering hypocentral (reviewer 2, commentaire 3)
+
+* Variables : $(x, y, z)$ en km, **non standardisées** (même unité) ; la magnitude est exclue.
+* $K = 2, \dots, 10$ ; critères silhouette, Calinski–Harabasz (CH) et Davies–Bouldin (DB).
+* Initialisation **k-means++** (codée ci-dessous ; la fonction `kmeans()` de R tire ses centres au hasard), 50 relances.
+* Stabilité : ARI sur 100 initialisations uniques, puis ARI et Jaccard par classe sur 200 rééchantillonnages bootstrap.
+
+```{r kmeans-functions}
+kmpp_centers <- function(X, k) {                       # k-means++ seeding (Arthur & Vassilvitskii 2007)
+  C <- X[sample(nrow(X), 1), , drop = FALSE]
+  d2 <- rowSums(sweep(X, 2, C[1, ])^2)
+  while (nrow(C) < k) {
+    newc <- X[sample(nrow(X), 1, prob = d2 / sum(d2)), ]
+    C <- rbind(C, newc); d2 <- pmin(d2, rowSums(sweep(X, 2, newc)^2))
+  }
+  C
+}
+kmeans_pp <- function(X, k, nstart = 50) {
+  best <- NULL
+  for (s in seq_len(nstart)) {
+    fit <- kmeans(X, centers = kmpp_centers(X, k), iter.max = 300, algorithm = "Lloyd")
+    if (is.null(best) || fit$tot.withinss < best$tot.withinss) best <- fit
+  }
+  best
+}
+ari <- function(a, b) {                                # adjusted Rand index (Hubert & Arabie 1985)
+  tab <- table(a, b); n <- sum(tab); c2 <- function(x) x * (x - 1) / 2
+  s_ij <- sum(c2(tab)); s_a <- sum(c2(rowSums(tab))); s_b <- sum(c2(colSums(tab)))
+  exp_ <- s_a * s_b / c2(n); (s_ij - exp_) / ((s_a + s_b) / 2 - exp_)
+}
+ch_index <- function(X, cl) {
+  k <- length(unique(cl)); n <- nrow(X); g <- colMeans(X)
+  W <- sum(sapply(unique(cl), function(j) sum(sweep(X[cl == j, , drop = FALSE], 2, colMeans(X[cl == j, , drop = FALSE]))^2)))
+  B <- sum(sapply(unique(cl), function(j) sum(cl == j) * sum((colMeans(X[cl == j, , drop = FALSE]) - g)^2)))
+  (B / (k - 1)) / (W / (n - k))
+}
+db_index <- function(X, cl) {
+  ks <- sort(unique(cl)); C <- t(sapply(ks, function(j) colMeans(X[cl == j, , drop = FALSE])))
+  S <- sapply(seq_along(ks), function(i) mean(sqrt(rowSums(sweep(X[cl == ks[i], , drop = FALSE], 2, C[i, ])^2))))
+  mean(sapply(seq_along(ks), function(i) max(sapply(seq_along(ks)[-i], function(j) (S[i] + S[j]) / sqrt(sum((C[i, ] - C[j, ])^2))))))
+}
+```
+
+```{r kmeans-select}
+X <- as.matrix(cc[, c("x_km", "y_km", "Depth")]); check_finite(X, "K-means des hypocentres")
+DX <- dist(X)
+sel <- do.call(rbind, lapply(2:10, function(k) {
+  fit <- kmeans_pp(X, k)
+  data.frame(K = k, inertia = fit$tot.withinss, silhouette = mean(silhouette(fit$cluster, DX)[, 3]),
+             CH = ch_index(X, fit$cluster), DB = db_index(X, fit$cluster))
+}))
+knitr::kable(sel, digits = 3)
+Kopt <- sel$K[which.max(sel$silhouette)]; cat("K retenu :", Kopt, "\n")
+
+for (v in list(c("x_km", "y_km", "Depth"), c("x_km", "y_km", "Depth", "Magnitude"))) {
+  Z <- scale(cc[, v]); DZ <- dist(Z)
+  s <- sapply(2:10, function(k) mean(silhouette(kmeans(Z, k, nstart = 20, iter.max = 100)$cluster, DZ)[, 3]))
+  cat(sprintf("Sensibilité, (%s) standardisées : silhouettes de %.2f à %.2f\n", paste(v, collapse = ","), min(s), max(s)))
+}
+```
+
+```{r kmeans-final}
+ref <- kmeans_pp(X, Kopt)
+ord <- order(ref$centers[, 1]); cc$cluster <- match(ref$cluster, ord)    # numbering west -> east
+ari_seed <- sapply(1:100, function(s) { set.seed(s); ari(ref$cluster, kmeans(X, kmpp_centers(X, Kopt), algorithm = "Lloyd", iter.max = 300)$cluster) })
+set.seed(1)
+boot <- replicate(200, {
+  idx <- sample(nrow(X), replace = TRUE); fb <- kmeans_pp(X[idx, ], Kopt, nstart = 10)
+  lab <- max.col(-sapply(1:Kopt, function(j) rowSums(sweep(X, 2, fb$centers[j, ])^2)), ties.method = "first")
+  jac <- sapply(1:Kopt, function(k) max(sapply(1:Kopt, function(j) sum(ref$cluster == k & lab == j) / sum(ref$cluster == k | lab == j))))
+  c(ARI = ari(ref$cluster, lab), jac)
+})
+cat(sprintf("ARI (100 initialisations uniques) : moyenne %.3f, minimum %.3f\n", mean(ari_seed), min(ari_seed)))
+cat(sprintf("ARI bootstrap : moyenne %.3f, 5e percentile %.3f\n", mean(boot[1, ]), quantile(boot[1, ], .05)))
+cat("Jaccard moyen par classe (numérotation k-means) :", round(rowMeans(boot[-1, , drop = FALSE]), 3), "\n")
+
+sil <- silhouette(cc$cluster, DX)[, 3]
+cc %>% mutate(sil = sil) %>% group_by(cluster) %>%
+  summarise(n = n(), lon_c = mean(Longitude), lon_p05 = quantile(Longitude, .05), lon_p95 = quantile(Longitude, .95),
+            depth_mean = mean(Depth), depth_p05 = quantile(Depth, .05), depth_p95 = quantile(Depth, .95),
+            M_mean = mean(Magnitude), M_max = max(Magnitude), silhouette = mean(sil)) %>%
+  mutate(share = 100 * n / sum(n)) %>% knitr::kable(digits = 2)
+round(prop.table(table(year = format(cc$time, "%Y"), cluster = cc$cluster), 1), 3)
+
+p_cl <- ggplot()
+if (!is.null(myt_contour_lonlat)) p_cl <- p_cl + geom_sf(data = myt_contour_lonlat, fill = "grey75", colour = "black")
+p_cl + geom_point(data = cc, aes(Longitude, Latitude, colour = factor(cluster)), size = .6, alpha = .6) +
+  annotate("point", x = FANI[1], y = FANI[2], shape = 2, size = 4) + coord_map +
+  labs(colour = "Cluster", x = "Longitude (°E)", y = "Latitude (°N)", title = "Hypocentral clusters on the map of Mayotte")
+
+ggplot(cc, aes(Longitude, Depth, colour = factor(cluster))) + geom_point(size = .6) + scale_y_reverse() +
+  labs(colour = "Cluster", x = "Longitude (°E)", y = "Depth (km)", title = "Hypocentral clusters, E–W section")
+```
+
+# Lissage exponentiel (Holt–Winters / ETS)
+
+Série hebdomadaire des événements avec $M \ge M_c$. Six modèles sont comparés sur une **fenêtre commune** (à partir de la semaine 105), sélectionnés par AICc et évalués sur les 52 dernières semaines tenues à l'écart. La fonction `HoltWinters()` de R ne permet ni d'imposer cette fenêtre commune ni de compter les états initiaux dans l'AICc ; on recode donc les récursions, à l'identique de la version Python.
+
+```{r weekly}
+d0 <- as.Date(min(m$time)); d1 <- as.Date(max(m$time)) - 1
+days <- seq(d0, d1, by = "day")
+daily <- as.numeric(table(factor(as.character(as.Date(cc$time)), levels = as.character(days))))
+wk_end <- days + (7 - as.integer(format(days, "%u"))) %% 7         # dimanche de fin de semaine
+weekly <- tapply(daily, wk_end, sum); weekly <- weekly[-c(1, length(weekly))]
+cat(length(weekly), "semaines ;", sum(weekly == 0), "semaines sans événement\n")
+table(format(cc$time, "%Y"))
+```
+
+```{r holt-winters}
+hw_filter <- function(par, y, trend, damped, season, mper = 52, h = 0) {
+  a <- par[1]; bb <- if (trend) par[2] else 0; g <- if (!is.null(season)) par[1 + trend + 1] else 0
+  phi <- if (damped) par[length(par)] else 1
+  if (!is.null(season)) {
+    l <- mean(y[1:mper]); b <- if (trend) (mean(y[(mper + 1):(2 * mper)]) - l) / mper else 0
+    s <- if (season == "add") y[1:mper] - l else y[1:mper] / l
+  } else { l <- y[1]; b <- if (trend) y[2] - y[1] else 0; s <- NULL }
+  fit <- numeric(length(y))
+  for (t in seq_along(y)) {
+    st <- if (!is.null(season)) s[t] else 0
+    fit[t] <- if (identical(season, "mul")) (l + phi * b) * st else l + phi * b + st
+    lp <- l; bp <- b
+    if (identical(season, "mul")) {
+      l <- a * y[t] / st + (1 - a) * (lp + phi * bp)
+    } else if (identical(season, "add")) {
+      l <- a * (y[t] - st) + (1 - a) * (lp + phi * bp)
+    } else {
+      l <- a * y[t] + (1 - a) * (lp + phi * bp)
+    }
+    if (trend) b <- bb * (l - lp) + (1 - bb) * phi * bp
+    if (identical(season, "mul")) s <- c(s, g * y[t] / (lp + phi * bp) + (1 - g) * st)
+    if (identical(season, "add")) s <- c(s, g * (y[t] - lp - phi * bp) + (1 - g) * st)
+  }
+  fc <- numeric(0)
+  if (h > 0) for (k in 1:h) {
+    damp <- if (trend) sum(phi^(1:k)) else 0
+    st <- if (!is.null(season)) s[length(y) - mper + ((k - 1) %% mper) + 1] else 0
+    fc[k] <- if (identical(season, "mul")) (l + damp * b) * st else l + damp * b + st
+  }
+  list(fit = fit, fc = fc)
+}
+SPECS <- list("SES (N,N)" = list(FALSE, FALSE, NULL), "Holt (A,N)" = list(TRUE, FALSE, NULL),
+              "Holt damped (Ad,N)" = list(TRUE, TRUE, NULL), "HW additive (A,A,52)" = list(TRUE, FALSE, "add"),
+              "HW multiplicative (A,M,52)" = list(TRUE, FALSE, "mul"), "HW damped additive (Ad,A,52)" = list(TRUE, TRUE, "add"))
+fit_hw <- function(y, sp, mper = 52) {
+  trend <- sp[[1]]; damped <- sp[[2]]; season <- sp[[3]]
+  npar <- 1 + trend + !is.null(season) + damped; start <- 2 * mper
+  lo <- rep(1e-4, npar); hi <- rep(.9999, npar); if (damped) { lo[npar] <- .8; hi[npar] <- .98 }
+  shift <- if (identical(season, "mul")) 1 else 0; yy <- y + shift
+  sse <- function(p) { e <- yy[(start + 1):length(yy)] - hw_filter(p, yy, trend, damped, season, mper)$fit[(start + 1):length(yy)]
+                       if (all(is.finite(e))) sum(e^2) else 1e12 }
+  best <- NULL
+  for (a0 in c(.1, .3, .6)) {
+    r <- optim(c(a0, .05, .1, .95)[1:npar], sse, method = "L-BFGS-B", lower = lo, upper = hi)
+    if (is.null(best) || r$value < best$value) best <- r
+  }
+  n <- length(y) - start; k <- npar + 1 + trend + if (!is.null(season)) mper else 0
+  aic <- n * log(best$value / n) + 2 * k
+  list(par = best$par, aicc = aic + 2 * k * (k + 1) / max(n - k - 1, 1), k = k, shift = shift)
+}
+y <- as.numeric(weekly); H <- 52; ytr <- y[1:(length(y) - H)]; yte <- tail(y, H)
+scale_mase <- mean(abs(diff(ytr)))
+met <- function(fc, one) c(MAE_h52 = mean(abs(yte - fc)), RMSE_h52 = sqrt(mean((yte - fc)^2)),
+                           MAE_1 = mean(abs(yte - one)), RMSE_1 = sqrt(mean((yte - one)^2)), MASE_1 = mean(abs(yte - one)) / scale_mase)
+res <- do.call(rbind, lapply(names(SPECS), function(nm) {
+  sp <- SPECS[[nm]]; f <- fit_hw(ytr, sp)
+  fc <- hw_filter(f$par, ytr + f$shift, sp[[1]], sp[[2]], sp[[3]], h = H)$fc - f$shift
+  one <- sapply(0:(H - 1), function(i) hw_filter(f$par, y[1:(length(ytr) + i)] + f$shift, sp[[1]], sp[[2]], sp[[3]], h = 1)$fc - f$shift)
+  data.frame(model = nm, alpha = f$par[1], k = f$k, AICc = f$aicc, t(met(fc, one)))
+}))
+bench <- rbind(data.frame(model = "Naive", t(met(rep(tail(ytr, 1), H), y[length(ytr):(length(y) - 1)]))),
+               data.frame(model = "Seasonal naive", t(met(tail(ytr, 52), y[(length(ytr) - 51):(length(y) - 52)]))),
+               data.frame(model = "Mean of last year", t(met(rep(mean(tail(ytr, 52)), H), rep(mean(tail(ytr, 52)), H)))))
+knitr::kable(bind_rows(res, bench), digits = 3)
+cat("Modèle retenu par l'AICc :", res$model[which.min(res$AICc)], "\n")
+```
+
+# Tests de saisonnalité annuelle et de cycle jour/nuit
+
+```{r seasonality}
+tt <- (seq_along(daily) - 1) / 365.25
+doy <- as.integer(format(days, "%j")) / 365.25
+for (step in c(2, 1)) {
+  kn <- seq(step, max(tt) - .25, by = step)
+  m0 <- glm(daily ~ bs(tt, knots = kn, degree = 3), family = quasipoisson)
+  m1 <- glm(daily ~ bs(tt, knots = kn, degree = 3) + sin(2 * pi * doy) + cos(2 * pi * doy), family = quasipoisson)
+  a <- anova(m0, m1, test = "F")
+  cat(sprintf("Harmonique annuelle (nœuds tous les %g ans) : F = %.2f, p = %.3f, dispersion = %.2f\n",
+              step, a$F[2], a$`Pr(>F)`[2], summary(m1)$dispersion))
+}
+kn <- seq(2, max(tt) - .25, by = 2); month <- factor(as.integer(format(days, "%m")))
+m0 <- glm(daily ~ bs(tt, knots = kn, degree = 3), family = quasipoisson)
+mM <- glm(daily ~ bs(tt, knots = kn, degree = 3) + month, family = quasipoisson)
+aM <- anova(m0, mM, test = "F"); cat(sprintf("Facteur mois : F(11) = %.2f, p = %.3f\n", aM$F[2], aM$`Pr(>F)`[2]))
+co <- c(0, coef(mM)[grep("^month", names(coef(mM)))]); se <- c(0, sqrt(diag(vcov(mM)))[grep("^month", names(coef(mM)))])
+cc_ <- co - mean(co)
+months <- data.frame(month = 1:12, RR = exp(cc_), lo = exp(cc_ - 1.96 * se), hi = exp(cc_ + 1.96 * se))
+ggplot(months, aes(month, RR)) + geom_pointrange(aes(ymin = lo, ymax = hi)) + geom_hline(yintercept = 1) +
+  scale_x_continuous(breaks = 1:12) + labs(y = "Rate ratio vs average month", title = "Month effects (quasi-Poisson, 95% CI)")
+
+gk_decluster <- function(df) {                         # Gardner & Knopoff (1974)
+  df <- df[order(df$time), ]; td <- as.numeric(df$time - min(df$time), units = "days")
+  keep <- rep(TRUE, nrow(df))
+  for (i in order(-df$Magnitude)) {
+    if (!keep[i]) next
+    Mi <- df$Magnitude[i]; L <- 10^(0.1238 * Mi + 0.983)
+    Tw <- if (Mi < 6.5) 10^(0.5409 * Mi - 0.547) else 10^(0.032 * Mi + 2.7389)
+    s <- abs(td - td[i]) <= Tw & sqrt((df$x_km - df$x_km[i])^2 + (df$y_km - df$y_km[i])^2) <= L & df$Magnitude <= Mi
+    s[i] <- FALSE; keep[s] <- FALSE
+  }
+  df[keep, ]
+}
+schuster_p <- function(ph) exp(-Mod(sum(exp(1i * ph)))^2 / length(ph))
+dc <- gk_decluster(cc)
+cat(sprintf("Dé-clusterisé : %d événements ; Schuster annuel p = %.3f\n", nrow(dc),
+            schuster_p(2 * pi * as.integer(format(dc$time, "%j")) / 365.25)))
+
+night <- function(df) {
+  hh <- as.integer(format(df$time + UTC_OFFSET_H * 3600, "%H", tz = "UTC")); k <- sum(hh >= 18 | hh < 6)
+  c(n = nrow(df), night_fraction = k / nrow(df), p = binom.test(k, nrow(df), .5)$p.value)
+}
+dn <- rbind("M<1" = night(filter(m, Magnitude < 1)), all = night(m), "M>=Mc" = night(cc),
+            "M>=2" = night(filter(m, Magnitude >= 2)), "M>=2.5" = night(filter(m, Magnitude >= 2.5)),
+            "M>=3" = night(filter(m, Magnitude >= 3)), "M>=Mc declustered" = night(dc))
+knitr::kable(dn, digits = 4)
+```
+
+La fraction nocturne décroît avec le seuil de magnitude et n'est plus significative pour $M \ge 3$ ni après dé-clustering : c'est un **biais de détection**, pas un forçage environnemental.
+
+# Lisseur à noyau spatio-temporel et validation croisée par blocs
+
+$d^2 = \|\Delta\mathbf s\|^2/h_s^2 + \Delta t^2/h_t^2$, avec $\mathbf s$ en km et $t$ en jours ; l'échelle espace–temps est $c = h_s/h_t$ (km/jour).
+
+```{r st-cv}
+d <- cc %>% arrange(time)
+xs <- d$x_km; ys <- d$y_km; zs <- d$Magnitude; ts <- as.numeric(d$time - min(d$time), units = "days"); N <- nrow(d)
+DS2 <- outer(xs, xs, "-")^2 + outer(ys, ys, "-")^2
+DT2 <- outer(ts, ts, "-")^2
+folds <- function(scheme, k = 5) {
+  lab <- switch(scheme,
+    random = sample(rep(1:k, length.out = N)),
+    spatial_block = kmeans(cbind(xs, ys), k, nstart = 20)$cluster,
+    pmin(floor((0:(N - 1)) * k / N) + 1, k))
+  if (scheme == "forward_chaining") return(lapply(2:k, function(f) list(tr = which(lab < f), te = which(lab == f))))
+  lapply(1:k, function(f) list(tr = which(lab != f), te = which(lab == f)))
+}
+pred_gauss <- function(tr, te, hs, ht) {
+  E <- matrix(0, length(te), length(tr))
+  if (is.finite(hs)) E <- E + DS2[te, tr, drop = FALSE] / hs^2
+  if (is.finite(ht)) E <- E + DT2[te, tr, drop = FALSE] / ht^2
+  W <- exp(-.5 * E); sw <- rowSums(W)
+  ifelse(sw > 1e-12, as.numeric(W %*% zs[tr]) / pmax(sw, 1e-300), mean(zs[tr]))
+}
+pred_idw <- function(tr, te, p, cc0) {
+  W <- (DS2[te, tr, drop = FALSE] + cc0^2 * DT2[te, tr, drop = FALSE] + .01)^(-p / 2); as.numeric(W %*% zs[tr]) / rowSums(W)
+}
+score <- function(fn, F) { e <- unlist(lapply(F, function(f) zs[f$te] - fn(f$tr, f$te))); c(RMSE = sqrt(mean(e^2)), MAE = mean(abs(e))) }
+
+HS <- c(.5, 1, 2, 3, 5, 10, Inf); HT <- c(3, 10, 30, 90, 180, 365, 1000, Inf)
+set.seed(0); cv <- list()
+for (scheme in c("random", "temporal_block", "spatial_block", "forward_chaining")) {
+  F <- folds(scheme)
+  cv[[length(cv) + 1]] <- data.frame(scheme, model = "baseline", p1 = NA, p2 = NA, t(score(function(tr, te) rep(mean(zs[tr]), length(te)), F)))
+  for (hs in HS) for (ht in HT) if (is.finite(hs) || is.finite(ht))
+    cv[[length(cv) + 1]] <- data.frame(scheme, model = "Gaussian", p1 = hs, p2 = ht, t(score(function(tr, te) pred_gauss(tr, te, hs, ht), F)))
+  for (p in 1:3) for (cc0 in c(.003, .01, .03, .1, .3, 1))
+    cv[[length(cv) + 1]] <- data.frame(scheme, model = "IDW", p1 = p, p2 = cc0, t(score(function(tr, te) pred_idw(tr, te, p, cc0), F)))
+}
+cv <- bind_rows(cv)
+best <- cv %>% filter(model != "baseline") %>% group_by(scheme, model) %>% slice_min(RMSE, n = 1) %>% ungroup() %>%
+  left_join(cv %>% filter(model == "baseline") %>% select(scheme, RMSE_base = RMSE), by = "scheme") %>%
+  mutate(skill_pct = 100 * (1 - RMSE / RMSE_base))
+knitr::kable(best, digits = 4)
+bt <- best %>% filter(scheme == "temporal_block", model == "Gaussian")
+HSF <- bt$p1; HTF <- bt$p2
+cat(sprintf("Fenêtres finales : h_s = %g km, h_t = %g jours, c = %.3f km/jour\n", HSF, HTF, HSF / HTF))
+```
+
+# Estimateur à noyau récursif des marques (section 3.5, théorème 1)
+
+Mises à jour : $\hat f_n = (1-\beta_n)\hat f_{n-1} + \beta_n K_{h_n}(\cdot - X_n)$ et $\hat\varphi_n = (1-\beta_n)\hat\varphi_{n-1} + \beta_n M_n K_{h_n}(\cdot - X_n)$, puis $\hat m_n = \hat\varphi_n/\hat f_n$, avec $h_n = h_0 n^{-a}$.
+
+```{r recursive-class}
+rec_init <- function(grid, h0, a = 1/6, beta = "harmonic") list(g = as.matrix(grid), h0 = h0, a = a, beta = beta,
+                                                                 f = numeric(nrow(grid)), phi = numeric(nrow(grid)), n = 0)
+rec_update <- function(st, x, mark) {
+  st$n <- st$n + 1; h <- st$h0 * st$n^(-st$a)
+  b <- if (identical(st$beta, "harmonic")) 1 / st$n else if (st$n == 1) 1 else st$beta
+  K <- exp(-.5 * ((st$g[, 1] - x[1])^2 + (st$g[, 2] - x[2])^2) / h^2) / (2 * pi * h^2)
+  st$f <- (1 - b) * st$f + b * K; st$phi <- (1 - b) * st$phi + b * mark * K; st
+}
+rec_predict <- function(st) ifelse(st$f > 0, st$phi / st$f, NA)
+
+# équivalence récursion / forme fermée
+set.seed(3); Xs <- matrix(rnorm(1000), ncol = 2); Ms <- sin(Xs[, 1]) + rnorm(500, 0, .5); u <- c(.3, .2)
+st <- rec_init(matrix(u, 1), h0 = 1); for (i in 1:500) st <- rec_update(st, Xs[i, ], Ms[i])
+hi <- (1:500)^(-1/6); Ki <- exp(-.5 * ((Xs[, 1] - u[1])^2 + (Xs[, 2] - u[2])^2) / hi^2) / hi^2
+cat("Écart récursion / forme fermée :", abs(rec_predict(st) - sum(Ki * Ms) / sum(Ki)), "\n")
+```
+
+**Simulation du théorème.** $X \sim \mathcal N(0, I_2)$, $m(u) = \sin u_1 + u_2^2/2$, $\sigma = 0{,}5$, $u = (0{,}3 ;\, 0{,}2)$, $\beta_n = 1/n$, $h_n = n^{-a}$ ; noyau gaussien avec $\mu_2 = 1$ et $R(K) = 1/(4\pi)$.
+
+```{r recursive-simulation}
+u0 <- c(.3, .2); m_true <- sin(u0[1]) + .5 * u0[2]^2; f_u <- exp(-.5 * sum(u0^2)) / (2 * pi)
+lap_m <- 1 - sin(u0[1]); grad_m <- c(cos(u0[1]), u0[2]); gf_f <- -u0
+set.seed(11)
+sim <- do.call(rbind, lapply(c(1/6, 1/4), function(a) do.call(rbind, lapply(c(500, 1000, 2000, 4000, 8000, 16000), function(n) {
+  h <- (1:n)^(-a)
+  est <- replicate(400, { Xr <- matrix(rnorm(2 * n), ncol = 2); Mr <- sin(Xr[, 1]) + .5 * Xr[, 2]^2 + rnorm(n, 0, .5)
+                          K <- exp(-.5 * ((Xr[, 1] - u0[1])^2 + (Xr[, 2] - u0[2])^2) / h^2) / h^2; sum(K * Mr) / sum(K) })
+  hn <- n^(-a)
+  data.frame(a = a, n = n, bias_emp = mean(est) - m_true,
+             bias_th = hn^2 / (2 * (1 - 2 * a)) * (lap_m + 2 * sum(grad_m * gf_f)),
+             var_emp = var(est), var_th = (1 / (4 * pi)) * .25 / ((1 + 2 * a) * n * hn^2 * f_u), mse_emp = mean((est - m_true)^2))
+}))))
+knitr::kable(sim, digits = 5)
+sim %>% group_by(a) %>% summarise(slope = coef(lm(log(mse_emp) ~ log(n)))[2], theory = -min(4 * a[1], 1 - 2 * a[1])) %>% knitr::kable(digits = 2)
+ggplot(sim, aes(n, var_emp, colour = factor(round(a, 3)))) + geom_point() + geom_line(aes(y = var_th), linetype = 2) +
+  scale_x_log10() + scale_y_log10() + labs(colour = "a", y = "Variance (points: empirical, dashed: theory)")
+```
+
+**Application en ligne au catalogue (prédiction puis mise à jour).**
+
+```{r recursive-online}
+h0 <- HSF * N^(1/6); burn <- 200
+online <- function(beta) {
+  st <- rec_init(cbind(xs, ys), h0 = h0, beta = beta); pr <- rep(NA, N)
+  for (i in 1:N) { if (i > 1 && st$f[i] > 1e-12) pr[i] <- st$phi[i] / st$f[i]; st <- rec_update(st, c(xs[i], ys[i]), zs[i]) }
+  pr
+}
+p1 <- online("harmonic"); p2 <- online(0.002); cm <- c(NA, cumsum(zs)[-N] / (1:(N - 1)))
+ok <- seq_len(N) > burn
+knitr::kable(data.frame(method = c("beta_n = 1/n", "beta = 0.002 (forgetting)", "cumulative mean"),
+  RMSE = c(sqrt(mean((zs - p1)[ok]^2, na.rm = TRUE)), sqrt(mean((zs - p2)[ok]^2, na.rm = TRUE)), sqrt(mean((zs - cm)[ok]^2))),
+  MAE = c(mean(abs(zs - p1)[ok], na.rm = TRUE), mean(abs(zs - p2)[ok], na.rm = TRUE), mean(abs(zs - cm)[ok]))), digits = 4)
+```
+
+# Cartes sur le contour de Mayotte (Figures 1, 3, 7, 10, 11 et 12 du manuscrit)
+
+Toutes les cartes utilisent le contour `myt_contour_lonlat`, chargé au début du notebook comme dans votre code d'origine (`read_sf("976_Commune.shp")`). Chaque figure est enregistrée dans `figures_R/` en PNG (300 dpi) et en PDF, sous le numéro qu'elle porte dans le manuscrit. La Figure 1 est enregistrée plus haut, dans le bloc `map`.
+
+```{r map-helpers}
+save_fig <- function(p, name, w = 13, h = 7) {
+  for (ext in c("png", "pdf")) ggsave(file.path(FIG, paste0(name, ".", ext)), p, width = w, height = h, dpi = 300)
+  cat("Figure enregistrée :", file.path(FIG, name), "(.png et .pdf)\n"); invisible(p)
+}
+has_map <- !is.null(myt_contour_lonlat)
+map_layers <- function() list(                         # contour de Mayotte, volcan, cadrage : à ajouter après les données
+  if (has_map) geom_sf(data = myt_contour_lonlat, fill = "grey75", colour = "black", inherit.aes = FALSE),
+  annotate("point", x = FANI[1], y = FANI[2], shape = 2, size = 3),
+  if (has_map) coord_sf(xlim = WINDOW$lon, ylim = WINDOW$lat, expand = FALSE) else
+    coord_fixed(ratio = 1 / cos(12.8 * pi / 180), xlim = WINDOW$lon, ylim = WINDOW$lat, expand = FALSE),
+  labs(x = "Longitude (°E)", y = "Latitude (°N)"))
+
+# grille de 1 km couvrant toute la fenêtre d'étude (Mayotte comprise)
+MG <- expand.grid(x = seq((WINDOW$lon[1] - LON0) * KX, (WINDOW$lon[2] - LON0) * KX, by = 1),
+                  y = seq((WINDOW$lat[1] - LAT0) * KY, (WINDOW$lat[2] - LAT0) * KY, by = 1))
+MG$lon <- LON0 + MG$x / KX; MG$lat <- LAT0 + MG$y / KY
+TW <- 1 / KX; TH <- 1 / KY                               # largeur et hauteur d'une cellule, en degrés
+m$Year <- format(m$time, "%Y")
+cq <- cc[order(cc$time), ]; cq$Year <- format(cq$time, "%Y"); YEARS <- sort(unique(cq$Year))
+ct <- as.numeric(difftime(cq$time, min(cq$time), units = "days"))
+m3 <- m[m$Magnitude >= 3, ]                              # séismes de niveau moyen
+stack_years <- function(lst, value) do.call(rbind, lapply(names(lst), function(yr) {
+  out <- data.frame(lon = MG$lon, lat = MG$lat, Year = yr); out[[value]] <- lst[[yr]]; out }))
+cat(nrow(MG), "cellules ; années", paste(range(YEARS), collapse = "–"), "\n")
+```
+
+## Figure 3 : magnitudes par année sur la carte de Mayotte
+
+```{r fig3-yearly-magnitude, fig.height=6}
+p3 <- ggplot() +
+  geom_point(data = m[order(m$Magnitude), ], aes(Longitude, Latitude, colour = pmin(pmax(Magnitude, .5), 4.5)), size = .6, alpha = .8) +
+  scale_colour_distiller(palette = "YlOrRd", direction = 1, limits = c(.5, 4.5), name = "Magnitude") +
+  map_layers() + facet_wrap(~Year, ncol = 3)
+print(p3); save_fig(p3, "Figure3_yearly_magnitude_map")
+```
+
+## Figure 7 : densité annuelle des séismes (noyau gaussien, fenêtre de 3 km)
+
+Densité des épicentres avec $M \ge M_c$, en événements par km² et par an ; cercles : séismes de niveau moyen ($M \ge 3$).
+
+```{r fig7-density, fig.height=6}
+HD <- 3
+gauss_grid <- function(x, y, h) exp(-.5 * ((MG$x - x)^2 + (MG$y - y)^2) / h^2) / (2 * pi * h^2)
+year_rate <- function(g, yr) {                           # événements par an (années incomplètes prises en compte)
+  t1 <- min(max(g$time), as.POSIXct(paste0(yr, "-12-31 23:59:00"), tz = "UTC"))
+  t0 <- max(min(g$time), as.POSIXct(paste0(yr, "-01-01 00:00:00"), tz = "UTC"))
+  nrow(g) / max(as.numeric(difftime(t1, t0, units = "days")) / 365.25, .5)
+}
+dens_batch <- lapply(YEARS, function(yr) {
+  g <- cq[cq$Year == yr, ]; dsum <- numeric(nrow(MG))
+  for (i in seq_len(nrow(g))) dsum <- dsum + gauss_grid(g$x_km[i], g$y_km[i], HD)
+  dsum / nrow(g) * year_rate(g, yr)
+}); names(dens_batch) <- YEARS
+DMAX <- max(sapply(dens_batch, max))
+dens_scale <- function() scale_fill_viridis_c(option = "magma", direction = -1, trans = "sqrt", limits = c(0, DMAX),
+                                              name = "events / km² / yr")
+p7 <- ggplot() + geom_tile(data = stack_years(dens_batch, "density"), aes(lon, lat, fill = density), width = TW, height = TH) +
+  dens_scale() + geom_point(data = m3, aes(Longitude, Latitude), shape = 1, size = 1, colour = "#08519c") +
+  map_layers() + facet_wrap(~Year, ncol = 3)
+print(p7); save_fig(p7, "Figure7_density_yearly")
+round(sapply(dens_batch, max), 2)
+```
+
+## Figure 10 : lisseur à noyau gaussien spatio-temporel des magnitudes, par année
+
+Champ lissé au 1ᵉʳ juillet de chaque année, avec les fenêtres `HSF` et `HTF` retenues plus haut. Points blancs : séismes à moins de $h_t$ de la date. Une carte par année est aussi enregistrée.
+
+```{r fig10-st-maps, fig.height=6}
+t_july <- function(yr) as.numeric(difftime(as.POSIXct(paste0(yr, "-07-01 00:00:00"), tz = "UTC"), min(cq$time), units = "days"))
+st_batch <- lapply(YEARS, function(yr) {
+  t0 <- t_july(yr); near <- if (is.finite(HTF)) which(abs(ct - t0) <= 4 * HTF) else seq_along(ct)
+  num <- numeric(nrow(MG)); den <- numeric(nrow(MG))
+  for (i in near) {
+    w <- exp(-.5 * (((MG$x - cq$x_km[i])^2 + (MG$y - cq$y_km[i])^2) / HSF^2 + (if (is.finite(HTF)) (t0 - ct[i])^2 / HTF^2 else 0)))
+    num <- num + w * cq$Magnitude[i]; den <- den + w
+  }
+  ifelse(den > .5, num / pmax(den, 1e-300), NA)
+}); names(st_batch) <- YEARS
+mag_scale <- function() scale_fill_viridis_c(limits = c(1.8, 2.8), oob = scales::squish, name = "Smoothed\nmagnitude")
+st_df <- stack_years(st_batch, "M"); st_df <- st_df[!is.na(st_df$M), ]
+near_pts <- do.call(rbind, lapply(YEARS, function(yr) {
+  g <- cq[abs(ct - t_july(yr)) <= (if (is.finite(HTF)) HTF else Inf), c("Longitude", "Latitude")]; if (nrow(g)) g$Year <- yr; g }))
+p10 <- ggplot() + geom_tile(data = st_df, aes(lon, lat, fill = M), width = TW, height = TH) + mag_scale() +
+  geom_point(data = near_pts, aes(Longitude, Latitude), colour = "white", size = .15, alpha = .5) +
+  map_layers() + facet_wrap(~Year, ncol = 3)
+print(p10); save_fig(p10, "Figure10_ST_smoother")
+for (yr in YEARS) {                                      # une carte par année (sous-figures du manuscrit)
+  py <- ggplot() + geom_tile(data = st_df[st_df$Year == yr, ], aes(lon, lat, fill = M), width = TW, height = TH) + mag_scale() +
+    geom_point(data = near_pts[near_pts$Year == yr, ], aes(Longitude, Latitude), colour = "white", size = .3, alpha = .5) + map_layers()
+  for (ext in c("png", "pdf")) ggsave(file.path(FIG, paste0("Figure10_ST_", yr, ".", ext)), py, width = 6, height = 4.3, dpi = 300)
+}
+```
+
+## Figure 11 : lissage récursif des marques comparé aux cartes de densité de la Figure 7
+
+Pour chaque année, les séismes sont traités un par un dans l'ordre chronologique : $\hat f_n = (1-\tfrac1n)\hat f_{n-1} + \tfrac1n K_{h_n}(\cdot - X_n)$, $\hat\varphi_n = (1-\tfrac1n)\hat\varphi_{n-1} + \tfrac1n M_n K_{h_n}(\cdot - X_n)$, $\hat m_n = \hat\varphi_n/\hat f_n$, avec $h_n = h_0 n^{-1/6}$. Réglage (A) : fenêtre finale de 3 km ; réglage (B) : fenêtre quadratique moyenne de 3 km, soit une fenêtre finale de $3\sqrt{1-2a} = 2{,}45$ km.
+
+```{r fig11-recursive-density, fig.height=8}
+A_EXP <- 1 / 6
+recursive_year <- function(g, h_final) {
+  h0 <- h_final * nrow(g)^A_EXP; f <- numeric(nrow(MG)); phi <- numeric(nrow(MG))
+  for (n in seq_len(nrow(g))) {
+    K <- gauss_grid(g$x_km[n], g$y_km[n], h0 * n^(-A_EXP))
+    f <- (1 - 1 / n) * f + K / n; phi <- (1 - 1 / n) * phi + g$Magnitude[n] * K / n
+  }
+  list(f = f, phi = phi)
+}
+rec_dens <- list(); rec_mag <- list(); rec_tab <- NULL
+for (yr in YEARS) {
+  g <- cq[cq$Year == yr, ]; rate <- year_rate(g, yr); bat <- dens_batch[[yr]]
+  rA <- recursive_year(g, HD); rB <- recursive_year(g, HD * sqrt(1 - 2 * A_EXP))
+  dA <- rA$f * rate; dB <- rB$f * rate
+  rec_dens[[yr]] <- dA; rec_mag[[yr]] <- ifelse(dA > .05, rA$phi / pmax(rA$f, 1e-300), NA)
+  rec_tab <- rbind(rec_tab, data.frame(year = yr, n = nrow(g), peak_batch = max(bat),
+    peak_A = max(dA), corr_A = cor(bat, dA), relL1_A = sum(abs(bat - dA)) / sum(bat),
+    peak_B = max(dB), corr_B = cor(bat, dB), relL1_B = sum(abs(bat - dB)) / sum(bat)))
+}
+knitr::kable(rec_tab, digits = 4)
+write.csv(rec_tab, file.path(OUT, "recursive_density_vs_batch.csv"), row.names = FALSE)
+
+d11 <- rbind(cbind(stack_years(dens_batch, "density"), panel = "(a) Batch density (Fig. 7)"),
+             cbind(stack_years(rec_dens, "density"), panel = "(b) Recursive density"))
+p11a <- ggplot() + geom_tile(data = d11, aes(lon, lat, fill = density), width = TW, height = TH) + dens_scale() +
+  geom_point(data = m3, aes(Longitude, Latitude), shape = 1, size = .8, colour = "#08519c") +
+  map_layers() + facet_grid(panel ~ Year)
+m11 <- stack_years(rec_mag, "M"); m11 <- m11[!is.na(m11$M), ]; m11$panel <- "(c) Recursive magnitude field"
+p11b <- ggplot() + geom_tile(data = m11, aes(lon, lat, fill = M), width = TW, height = TH) + mag_scale() +
+  geom_point(data = m3, aes(Longitude, Latitude), shape = 1, size = .8, colour = "white") +
+  map_layers() + facet_grid(panel ~ Year)
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork); p11 <- p11a / p11b + plot_layout(heights = c(2, 1)); print(p11); save_fig(p11, "Figure11_recursive_density", w = 18, h = 9)
+} else {
+  print(p11a); print(p11b); save_fig(p11a, "Figure11ab_recursive_density", w = 18, h = 6); save_fig(p11b, "Figure11c_recursive_magnitude", w = 18, h = 3.5)
+}
+```
+
+## Figure 12 : lissage récursif spatio-temporel
+
+$F_n = e^{-(t_n - t_{n-1})/\tau} F_{n-1} + K_h(\cdot - X_n)$, $\Phi_n = e^{-(t_n - t_{n-1})/\tau}\Phi_{n-1} + M_n K_h(\cdot - X_n)$, $\hat m_n = \Phi_n / F_n$ et intensité $\hat\lambda_n = F_n/\tau$. Cet estimateur n'utilise que le passé. Les paramètres $(h, \tau)$ sont choisis par validation prédictive : chaque magnitude est prédite avant que le séisme soit intégré (erreur évaluée sur les derniers 80 % des événements).
+
+```{r fig12-recursive-st, fig.height=8}
+# xs, ys, zs, ts, N et DS2 viennent du bloc st-cv (événements triés par date)
+prequential <- function(h, tau) {
+  f <- numeric(N); phi <- numeric(N); pred <- rep(NA_real_, N); tprev <- ts[1]
+  for (n in seq_len(N)) {
+    dec <- if (is.finite(tau)) exp(-(ts[n] - tprev) / tau) else 1
+    f <- f * dec; phi <- phi * dec; tprev <- ts[n]
+    if (f[n] > 1e-12) pred[n] <- phi[n] / f[n]
+    K <- exp(-.5 * DS2[n, ] / h^2); f <- f + K; phi <- phi + zs[n] * K
+  }
+  pred
+}
+ev <- seq_len(N) > floor(N / 5); cum <- c(NA, cumsum(zs)[-N] / (1:(N - 1)))
+pq <- do.call(rbind, lapply(c(2, 3, 5, 10), function(h) do.call(rbind, lapply(c(30, 90, 180, 365, 730, Inf), function(tau) {
+  p <- prequential(h, tau); p <- ifelse(is.na(p), cum, p); e <- (zs - p)[ev]
+  data.frame(h_km = h, tau_days = tau, RMSE = sqrt(mean(e^2)), MAE = mean(abs(e)))
+}))))
+knitr::kable(pq, digits = 4)
+write.csv(pq, file.path(OUT, "st_recursive_prequential.csv"), row.names = FALSE)
+bq <- pq[which.min(pq$RMSE), ]; HR <- bq$h_km; TAU <- bq$tau_days
+cat(sprintf("Paramètres retenus : h = %g km, tau = %g jours ; RMSE = %.4f ; moyenne courante : RMSE = %.4f\n",
+            HR, TAU, bq$RMSE, sqrt(mean((zs - cum)[ev]^2))))
+
+Fg <- numeric(nrow(MG)); Pg <- numeric(nrow(MG)); tprev <- ts[1]; n <- 1; st_rec <- list(); st_lam <- list(); st_tab <- NULL
+for (yr in YEARS) {
+  t0 <- t_july(yr)
+  while (n <= N && ts[n] <= t0) {
+    dec <- if (is.finite(TAU)) exp(-(ts[n] - tprev) / TAU) else 1
+    K <- exp(-.5 * ((MG$x - xs[n])^2 + (MG$y - ys[n])^2) / HR^2)
+    Fg <- Fg * dec + K; Pg <- Pg * dec + zs[n] * K; tprev <- ts[n]; n <- n + 1
+  }
+  dec <- if (is.finite(TAU)) exp(-(t0 - tprev) / TAU) else 1
+  Fr <- Fg * dec; Pr <- Pg * dec
+  st_rec[[yr]] <- ifelse(Fr > .5, Pr / pmax(Fr, 1e-300), NA)
+  st_lam[[yr]] <- Fr / (2 * pi * HR^2) / (if (is.finite(TAU)) TAU else max(t0, 1)) * 365.25
+  ok <- !is.na(st_rec[[yr]]) & !is.na(st_batch[[yr]])
+  st_tab <- rbind(st_tab, data.frame(year = yr, events_used = n - 1, corr = cor(st_batch[[yr]][ok], st_rec[[yr]][ok]),
+                                     median_abs_diff = median(abs(st_batch[[yr]][ok] - st_rec[[yr]][ok]))))
+}
+knitr::kable(st_tab, digits = 4)
+write.csv(st_tab, file.path(OUT, "st_recursive_vs_batch.csv"), row.names = FALSE)
+
+d12 <- rbind(cbind(stack_years(st_batch, "M"), panel = "(a) Batch S-T smoother"),
+             cbind(stack_years(st_rec, "M"), panel = "(b) Recursive S-T smoother"))
+d12 <- d12[!is.na(d12$M), ]
+p12a <- ggplot() + geom_tile(data = d12, aes(lon, lat, fill = M), width = TW, height = TH) + mag_scale() +
+  map_layers() + facet_grid(panel ~ Year)
+l12 <- stack_years(st_lam, "intensity"); l12$panel <- "(c) Recursive S-T intensity"
+p12b <- ggplot() + geom_tile(data = l12, aes(lon, lat, fill = intensity), width = TW, height = TH) +
+  scale_fill_viridis_c(option = "magma", direction = -1, trans = "sqrt", name = "events / km² / yr") +
+  map_layers() + facet_grid(panel ~ Year)
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork); p12 <- p12a / p12b + plot_layout(heights = c(2, 1)); print(p12); save_fig(p12, "Figure12_recursive_ST", w = 18, h = 9)
+} else {
+  print(p12a); print(p12b); save_fig(p12a, "Figure12ab_recursive_ST", w = 18, h = 6); save_fig(p12b, "Figure12c_recursive_intensity", w = 18, h = 3.5)
+}
+```
+
+# Coût de calcul (aperçu)
+
+Le benchmark complet (jusqu'à $10^6$ événements, KD-tree avec traitement par blocs) se trouve dans le notebook Python et dans `s5_scalability.py`. On illustre ici la croissance quadratique du lisseur dense et, si le paquet `RANN` est installé, une recherche de voisins par KD-tree (limitée à 500 voisins par point).
+
+```{r scaling}
+rate <- nrow(cc) / as.numeric(max(cc$time) - min(cc$time), units = "days")
+synth <- function(n) { i <- sample(nrow(cc), n, replace = TRUE)
+  list(x = cc$x_km[i] + rnorm(n, 0, .5), y = cc$y_km[i] + rnorm(n, 0, .5), t = sort(runif(n, 0, n / rate)), z = cc$Magnitude[i]) }
+nw_dense <- function(s) { W <- exp(-.5 * ((outer(s$x, s$x, "-")^2 + outer(s$y, s$y, "-")^2) / HSF^2 + outer(s$t, s$t, "-")^2 / HTF^2)); diag(W) <- 0
+                          as.numeric(W %*% s$z) / rowSums(W) }
+nw_tree <- function(s) { U <- cbind(s$x / HSF, s$y / HSF, s$t / HTF)
+  nn <- RANN::nn2(U, U, k = min(500, nrow(U)), searchtype = "radius", radius = 3)
+  W <- ifelse(nn$nn.idx > 0, exp(-.5 * nn$nn.dists^2), 0); W[, 1] <- 0           # first neighbour = the point itself
+  Z <- matrix(s$z[pmax(nn$nn.idx, 1)], nrow(U)); rowSums(W * Z) / rowSums(W) }
+sc <- do.call(rbind, lapply(c(1000, 3000, 6000, 10000, 30000), function(n) { s <- synth(n)
+  data.frame(N = n,
+             dense_s = if (n <= 6000) system.time(nw_dense(s))[["elapsed"]] else NA,
+             tree_s = if (requireNamespace("RANN", quietly = TRUE)) system.time(nw_tree(s))[["elapsed"]] else NA) }))
+knitr::kable(sc, digits = 3)
+```
+
+# Synthèse
+
+```{r save}
+write.csv(sel, file.path(OUT, "K_selection.csv"), row.names = FALSE)
+write.csv(bind_rows(res, bench), file.path(OUT, "holt_winters.csv"), row.names = FALSE)
+write.csv(best, file.path(OUT, "cv_best.csv"), row.names = FALSE)
+write.csv(sim, file.path(OUT, "recursive_simulation.csv"), row.names = FALSE)
+sessionInfo()
+```
