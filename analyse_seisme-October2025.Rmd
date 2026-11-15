@@ -1,0 +1,2988 @@
+---
+title: "Spatio-temporal modeling of the Fani Maoré marine volcano earthquake data"
+output: html_document
+date: "2025-10-07"
+---
+
+```{r warning=FALSE, message=FALSE}
+# library(tmap)
+rm(list = ls())
+library(readxl)
+library(lubridate)
+library("dplyr") 
+library("fields")
+library("ggplot2") 
+library("gstat") 
+library("RColorBrewer") 
+library("sp") 
+library("spacetime") 
+library("tidyr")
+library("sf")
+library("reshape2")
+library("dplyr")
+library("FRK")
+library("ggplot2")
+library("gstat")
+library("RColorBrewer")
+library("sp")
+library("spacetime")
+library("tidyr")
+library(vegan)
+library(GGally)
+library(ggplot2)
+library(ggthemes)
+library(tidyverse)
+library(readxl)
+library(openxlsx)
+library(sf)
+library(readxl)
+library(lubridate)
+library(mgcv)
+library(mice)
+library(reshape2)
+library(caret)
+library(stringr)
+library(automap)
+library(MapGAM)
+library(gstat)
+library(forecast)
+library(zoo)
+library(flextable)
+library(here)
+library(cowplot)
+library(fields)
+library(corrplot)
+# getting HTML tables from R model summaries
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+
+# loading useful functions we coded ourselves
+rm(list = ls())
+```
+
+
+```{r}
+#Pour augmenter la memoire de R pour calculer les grosses matrices*
+ # library(usethis)
+# edit_r_environ()
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(readr)
+basemayotte=read.csv("data_seisme2025.csv", sep=";")
+basemayotte <-basemayotte %>% mutate(Date= as.Date(Date), Year = year(Date),Week=week(Date),Maginitude = as.numeric(Magnitude), 
+         Depth = as.numeric(Depth),
+         Longitude = as.numeric(Longitude),
+         Latitude = as.numeric(Latitude),
+         Magnitude = as.numeric(Magnitude)) %>% 
+  #filter(Year == 2019) %>% 
+  arrange(Date)
+basemayotte
+```
+
+
+```{r}
+#Countour
+myt_contour <- read_sf("976_Commune.shp")
+basemayottedf <- st_as_sf(basemayotte, coords = c("Longitude", "Latitude"), 
+                         crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+basemayottedf <- st_transform(basemayottedf, crs = st_crs(myt_contour))
+basemayottedf <- bind_cols(basemayottedf, st_coordinates(st_centroid(basemayottedf$geometry)))
+View(basemayottedf)
+```
+
+
+
+
+## IDE for earthquake
+```{r}
+myt_contour_lonlat <- st_transform(myt_contour, "+proj=longlat +ellps=WGS84 +datum=WGS84") %>% 
+  st_union()
+```
+
+
+#Fitting the IDE Model
+#In Lab 5.2 we ﬁtted the IDE model to the entire data set. Here, instead, we ﬁt the IDE model to the training data set created above. As before, since this computation takes a long time, we can load the results directly from cache.
+
+```{r}
+# La profoncdeur a été zappé ici (oublié ce code)
+basemayotte_bis <- basemayotte %>% 
+  mutate(Month_num = lubridate::month(Date) %>% as.double(), 
+         Year_num = as.numeric(as.character(Year)),
+         Year_month = ym(paste0(Year_num, "-", Month_num))) %>%
+  group_by(Year_num, Month_num, Year_month, Longitude, Latitude) %>%
+  dplyr::summarise(Magnitude = mean(Magnitude), 
+                   Depth = mean(Depth), .groups = "drop") %>% 
+  na.omit()
+
+dim(basemayotte_bis)
+View(basemayotte_bis)
+```
+
+
+## 
+```{r}
+# pred grid
+get_coord_limits <- function(x, y){
+  list(lon = c(min = min(x), max = max(x)),
+       lat = c(min = min(y), max = max(y))
+  )
+}
+
+
+coord_lim <- get_coord_limits(basemayotte$Longitude, basemayotte$Latitude)
+pred_grid <- expand.grid(Longitude = seq(coord_lim$lon[1], coord_lim$lon[2], length = 150), 
+                         Latitude = seq(coord_lim$lat[1], coord_lim$lat[2], length = 150),
+                         Month_num = 1:12)
+
+pred_grid2 <- expand.grid(Longitude = seq(coord_lim$lon[1], coord_lim$lon[2], length = 150), 
+                         Latitude = seq(coord_lim$lat[1], coord_lim$lat[2], length = 150),
+                         Year_month = as.numeric(unique(basemayotte$Year_month)))
+
+
+pred_grid_sf <- st_as_sf(pred_grid, coords = c("Longitude", "Latitude"), 
+                         crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+pred_grid_sf <- st_transform(pred_grid_sf, crs = st_crs(myt_contour))
+pred_grid_sf <- bind_cols(pred_grid_sf, st_coordinates(st_centroid(pred_grid_sf$geometry)))
+```
+
+
+###Lab 2.2: Visualization
+
+
+```{r}
+labeller <- basemayotte %>% dplyr::select(starts_with("Year")) %>% 
+  unique()
+
+labeller2 <- labeller$Year
+names(labeller2) <- labeller$Year
+# Year == 2018
+all_plots <- basemayottedf %>% 
+  split(., .$Year) %>% 
+  lapply(function(df){
+    # get values
+    y <- unique(df$Year)
+    p <- myt_contour %>% ggplot() + geom_sf(fill = "black") + 
+      # adding points from the csv data
+      geom_point(data = df %>% filter(Year == y), 
+                 aes(X, Y, col = Depth)) + 
+      xlab("Longitude") + ylab("Latitude") + 
+      scale_color_gradient2(low = "blue", mid = "orange", high = "red") + 
+      # scale_color_manual(values = c("green", "blue", "red"), labels = c('Low', 'Medium', 'High')) + 
+      facet_wrap(~Year, labeller = as_labeller(labeller2))
+    ggsave(paste0("./Earthquake_folder/Earth_cases_monthly", y, ".png"), width = 10)
+    
+    p
+  })
+
+all_plots$`2025`
+```
+
+
+```{r}
+library(ggplot2)
+library(sf)
+
+ggplot() +
+  # Base map with sf object
+  geom_sf(data = myt_contour, fill = "black", color = "white") +
+  
+  # Adding points from CSV with color mapped to Magnitude
+  geom_point(
+    data = basemayottedf,
+    aes(x = X, y = Y, color = Magnitude),
+    size = 1.5,
+    alpha = 0.8
+  ) +
+  
+  # Labels
+  xlab("Longitude") +
+  ylab("Latitude") +
+  
+  # Color gradient: green -> yellow -> orange -> red
+  scale_color_gradientn(
+    colors = c("green", "yellow", "orange", "red")
+  ) 
+```
+
+```{r}
+# Exemple pour RStudio / R Markdown
+#options(repr.plot.width = 25, repr.plot.height = 5)
+
+ggplot() +
+  geom_sf(data = myt_contour, fill = "black", color = "white") +
+  geom_point(
+    data = basemayottedf,
+    aes(x = X, y = Y, color = Depth),
+    size = 0.7,
+    alpha = 5
+  ) +
+  xlab("Longitude") +
+  ylab("Latitude") +
+  scale_color_gradientn(colors = c("green", "yellow", "orange", "red")) +
+# Thème minimal avec cadre
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, size = 1),  # cadre
+    legend.position = "right",
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+ggsave("Figure6.pdf")
+
+```
+
+```{r}
+options(repr.plot.width = 25, repr.plot.height = 5)
+
+ggplot() +
+  # Carte de base
+  geom_sf(data = myt_contour, fill = "black", color = "white") +
+  
+  # Points des séismes
+  geom_point(
+    data = basemayottedf,
+    aes(x = X, y = Y, color = Depth),
+    size = 2,
+    alpha = 0.8
+  ) +
+  
+  # Labels
+  xlab("Longitude") +
+  ylab("Latitude") +
+  
+  # Palette de couleur : vert -> jaune -> orange -> rouge
+  scale_color_gradientn(colors = c("green", "yellow", "orange", "red")) +
+  
+  # Thème minimal avec cadre
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, size = 1),  # cadre
+    legend.position = "right",
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+ggsave("Figure6b.pdf")
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sf)
+seismes_plots <- ggplot(basemayotte %>% filter(Year == 2025)) +
+  geom_point(aes(x = Longitude, y = Latitude, colour = Magnitude), size = 2) + 
+  scale_color_gradientn(colors = c("yellow", "orange", "red")) +  # dégradé vif jaune -> orange -> rouge
+  xlab("Longitude") +
+  ylab("Latitude") +
+  geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 2) +  # ajouter les contours
+  facet_grid(~Year) +  # facette par année
+  theme_bw() +
+  labs(color = "Magnitude")  # ajouter un label à la légende
+
+# Afficher le graphique
+print(seismes_plots)
+
+# Sauvegarder en PDF
+#ggsave("Projet-BUT3/Article-Seisme/Evolution_Magnitude_2025.pdf", plot = seismes_plots, width = 10, height = 8, dpi = 300, device = cairo_pdf)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sf)
+
+# Suppose que ton jeu de données s'appelle basemayotte
+# et qu’il contient les colonnes : Longitude, Latitude, Magnitude, Year
+
+seismes_plots <- ggplot(basemayotte) +
+  # Carte de fond (contour de Mayotte)
+  geom_sf(data = myt_contour_lonlat, fill = "black", color = "white", size = 0.3) +
+  
+  # Points sismiques colorés selon la magnitude
+  geom_point(
+    aes(x = Longitude, y = Latitude, color = Magnitude),
+    size = 2,
+    alpha = 0.8
+  ) +
+    # Color gradient: green -> yellow -> orange -> red
+  scale_color_gradientn(
+    colors = c("green", "yellow", "orange", "red")
+  ) +
+  # Dégradé de couleur du jaune au rouge
+  #scale_color_gradientn(colors = c("green", "yellow", "red")) +
+    
+  # Axes et légendes
+  xlab("Longitude") +
+  ylab("Latitude") +
+  labs(color = "Magnitude") +
+  
+  # Une facette par année
+  facet_wrap(~ Year, ncol = 2) +
+  
+  # Thème graphique
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.position = "right"
+  )
+
+# Afficher le graphique
+print(seismes_plots)
+```
+##Facette sur l'année
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sf)
+
+# Suppose que ton jeu de données s'appelle basemayotte
+# et qu’il contient les colonnes : Longitude, Latitude, Magnitude, Year
+
+seismes_plots <- ggplot(basemayotte) +
+  # Carte de fond (contour de Mayotte)
+  geom_sf(data = myt_contour_lonlat, fill = "black", color = "white", size = 0.5) +
+  
+  # Points sismiques colorés selon la magnitude
+  geom_point(
+    aes(x = Longitude, y = Latitude, color = Magnitude),
+    size = 1.5,
+    alpha = 0.7
+  ) +
+  
+    # Color gradient: green -> yellow -> orange -> red
+  scale_color_gradientn(
+    colors = c("green", "yellow", "orange", "red")
+  ) +
+  # Dégradé de couleur du jaune vers le rouge
+  #scale_color_gradientn(colors = c("green", "yellow", "orange", "red")) +
+  
+  # Axes et titres
+  xlab("Longitude") +
+  ylab("Latitude") +
+  labs(color = "Magnitude") +
+  
+  # Facettes : 4 colonnes et 2 lignes
+  facet_wrap(~ Year, ncol = 4, nrow = 2) +
+  
+  # Thème de style publication
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.position = "right",
+    panel.grid = element_line(color = "gray90")
+  )
+
+# Afficher le graphique
+print(seismes_plots)
+
+```
+#Facettage par année 
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sf)
+
+# Suppose que ton jeu de données s'appelle basemayotte
+# et qu’il contient les colonnes : Longitude, Latitude, Magnitude, Year
+
+seismes_plots <- ggplot(basemayotte) +
+  # Carte de fond (contour de Mayotte)
+  geom_sf(data = myt_contour_lonlat, fill = "black", color = "white", size = 0.4) +
+  
+  # Points sismiques colorés selon la magnitude
+  geom_point(
+    aes(x = Longitude, y = Latitude, color = Depth),
+    size = 0.85,
+    alpha = 0.8
+  ) +
+  
+  # Dégradé de couleur (vert → jaune → orange → rouge)
+  scale_color_gradientn(colors = c("blue", "red")) +
+  
+  # Axes et labels
+  xlab("Longitude") +
+  ylab("Latitude") +
+  labs(color = "Depth") +
+  
+  # Facettes : 4 colonnes × 2 lignes
+  facet_wrap(~ Year, ncol = 4, nrow = 2) +
+  
+  # Thème de style publication
+  theme_bw(base_size = 16) +  # base_size augmente la taille de la police
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "right",
+    panel.grid = element_line(color = "gray90"),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Afficher le graphique dans R
+print(seismes_plots)
+
+# Sauvegarde en grand format (A3 paysage environ)
+ggsave("Figure_depth_years.pdf", seismes_plots, width = 18, height = 10, dpi = 300)
+```
+
+
+```{r}
+seismes_plots= ggplot(basemayotte %>% filter(Year==2018))+ #plots points
+  geom_point(aes(x=Longitude,y=Latitude,colour=Magnitude),size=2)+ #lon and lat and attribute
+  xlab("Longitude")+ylab("Latitude")+
+  geom_sf(data=myt_contour_lonlat,fill = "transparent", size = 2)+ #add US map
+  facet_grid(~Year) + #facet by time 
+  theme_bw() ## BW theme can change 
+seismes_plots 
+ggsave("6.Earthquake/Evolution_Magnitude_2018.pdf")
+```
+
+
+
+#Times series plots (refaire by week)
+```{r}
+ggplot(basemayotte %>% filter(Year==2019))+ #plots points
+  geom_line(aes(x=Month,y=Magnitude))+ #line plot of magnitude against time=Month
+  facet_wrap(~Week,ncol=5) + #
+   xlab("Week")+ylab("Magnitude")+
+   theme_bw()+
+   theme(panel.spacing = unit(1,"lines")) # facet spacing
+```
+
+
+
+## IDW model
+
+```{r}
+library(sf)
+library(gstat)
+library(dplyr)
+
+# Transformer basemayotte en objet sf
+myt_contour_lonlat <- st_transform(myt_contour, "+proj=longlat +ellps=WGS84 +datum=WGS84") %>% 
+  st_union()
+
+basemayotte_sf <- basemayotte %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)  # WGS84
+```
+
+
+```{r}
+# Créer une grille régulière
+# Étendre la bbox (bounding box) du contour
+bbox <- st_bbox(myt_contour_lonlat)
+bbox["xmax"] <- 45.8  # élargir la longitude max à 48
+
+# Créer une grille régulière basée sur cette bbox élargie
+pred_grid <- st_make_grid(
+  st_as_sfc(bbox),  # convertir bbox en polygone simple
+  cellsize = 0.01,  # résolution de la grille
+  what = "centers"
+) %>% st_sf()
+
+```
+
+
+```{r}
+magnitude_myt <- basemayotte_sf %>% 
+  split(., .$Year) %>% 
+  lapply(function(Year_sf){
+    # IDW interpolation
+    idw_res <- gstat::idw(formula = Magnitude ~ 1, 
+                          locations = Year_sf,  # doit être un objet sf/sp
+                          newdata = pred_grid, 
+                          idp = 5)
+    
+    # Convertir le résultat en sf et ajouter coordonnées
+    idw_sf <- st_as_sf(idw_res)
+    idw_sf <- st_transform(idw_sf, crs = st_crs(myt_contour_lonlat))
+     idw_sf <- bind_cols(idw_sf, st_coordinates(idw_sf))
+# Les colonnes "X" et "Y" existent déjà après st_coordinates()
+    return(idw_sf)
+  })
+
+magnitude_myt$`2018` %>% summary()
+magnitude_myt %>% lapply(head)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(sf)
+```
+
+
+```{r}
+# Extraire la liste pour l'année XXX
+magnitude_2018=magnitude_myt$`2018`
+names(magnitude_2018)
+magnitude_2018$Magnitude_Rate=(magnitude_2018$var1.pred - min(magnitude_2018$var1.pred))/(max(magnitude_2018$var1.pred) - min(magnitude_2018$var1.pred))
+```
+
+
+```{r}
+p2018 <- ggplot(magnitude_2018) + 
+  geom_tile(aes(x = X, y = Y, fill = Magnitude_Rate)) + 
+  # Correction : scale_fill_gradientn au lieu de scale_color_gradientn
+  scale_fill_gradientn(
+    colors = c("green", "yellow", "orange", "red"),
+    name = "Magnitude_Rate"
+  ) + 
+  geom_sf(data = myt_contour_lonlat, fill = "transparent", color = "black", size = 0.2) + 
+  theme_minimal() + 
+  labs(
+    title = "Smoothed seismic magnitudes for 2018",
+    x = "Longitude", 
+    y = "Latitude"
+  )
+
+p2018
+
+ggsave("Projet-BUT3/Seisme-modeling/Predicted_Magnitude_2018New.pdf", p2018)
+```
+
+
+
+
+### Series Temporelles
+#basemayotte
+
+```{r}
+library(tidyverse)
+
+# Calcul du nombre de séismes et de la magnitude moyenne par jour
+daily_eq <- basemayotte %>%
+  dplyr::group_by(Date) %>%
+  dplyr::summarise(
+    n_seismes = dplyr::n(),                          # nombre de séismes
+    mean_magnitude = mean(Magnitude, na.rm = TRUE)   # magnitude moyenne
+  ) %>%
+  ungroup() %>%
+  arrange(Date)
+
+```
+#visualisation rapide
+```{r}
+ggplot(daily_eq, aes(x = Date, y = n_seismes)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "",
+    x = "Date",
+    y = "Number of earthquakes"
+  ) +
+  theme_minimal()
+# Sauvegarde du graphique
+```
+
+
+```{r}
+Y=ts(data = daily_eq$n_seismes)
+#Visualisations des series
+mean(Y) # Moyenne
+plot(Y, type="l", col="darkblue")
+```
+
+```{r}
+library(googleVis)
+
+# Vérifier que la colonne Date est bien de type Date
+daily_eq <- daily_eq %>%
+  mutate(Date = as.Date(Date))
+
+# Création du graphique interactif
+chart <- gvisAnnotationChart(
+  data = daily_eq,
+  datevar = "Date",
+  numvar = "n_seismes",
+  options = list(
+    width = 1000,
+    height = 500,
+    displayAnnotations = TRUE,
+    displayZoomButtons = TRUE,
+    colors = "['#1f77b4']"
+  )
+)
+
+# Affichage dans le viewer ou navigateur
+plot(chart)
+
+```
+
+
+```{r}
+#Test de dickey Fuller
+library(tseries)
+test1<-adf.test(Y)
+test1
+```
+
+```{r}
+d_Y=diff(Y)
+plot(d_Y, col='blue')
+```
+
+```{r}
+# Série temporelle journalière du nombre de séismes
+newdata10 <- ts(
+  daily_eq$n_seismes,
+  start = c(2018, as.numeric(format(min(daily_eq$Date), "%j"))), # jour de l'année du début
+  frequency = 365
+)
+
+class(newdata10)
+
+```
+
+#La décomposition 
+```{r}
+library(fable)
+library(tsibbledata)
+library(dplyr)
+library(forcats)
+```
+
+```{r}
+#La decomposition additive
+decomp1<-decompose(newdata10,type="add")
+plot(decomp1,col="blue")
+```
+#Représentation de la saisonalité
+```{r}
+seasonality=decomp1$seasonal
+plot(seasonality)
+```
+#Représentation de la tendance
+```{r}
+trends=decomp1$trend
+plot(trends)
+```
+
+```{r}
+#La décomposition multiplicative
+decomp2<-decompose(newdata10,type="mul")
+plot(decomp2, col="red")
+```
+```{r}
+Tend.add<-decomp1$trend
+Sais.add<-decomp1$seasonal
+Tend.mult<-decomp2$trend
+Sais.mult<-decomp2$seasonal
+```
+
+```{r}
+ts.plot(cbind(Tend.add,Tend.add+Sais.add),lty=1:2)
+ts.plot(cbind(Tend.mult,Tend.mult*Sais.mult),lty=1:2)
+```
+
+Nous allons voir la qualité de nos estimations en comparant les valeurs exactes, la prédiction additive et la multiplicative.
+
+```{r}
+ts.plot(cbind(newdata10,Tend.add+Sais.add,Tend.mult*Sais.mult)
+,col=c("black","#009999","red"),lty=1:3)
+```
+On constate bien une bonne différence entre les prévisions et les fréquences exactes. Cela peut être dû par la présence d'autres phénomènes
+
+On constate bien une bonne différence entre les prévisions et les fréquences exactes. Cela peut être dû par la présence d'autres phénomènes. 
+
+Nous allons utiliser les méthodes de de Holt qui mettent en évidence l'horizon delà tendance (pente) de la série dans le temps  T et qui ajoute un coefficient saisonnier la dernière.
+
+Nous allons utiliser la méthode de holt winters qui ajoute un coefficient saisonnier sur les données.
+
+\section{La méthode de Holt}
+## La méthode de Holt: Pas de saisonnalité mais avec tendance.
+Holt a étendu le lissage exponentiel simple pour permettre la prévision des données avec une tendance (Tt). Cette méthode implique une équation de prévision et deux équations de lissage (une pour le niveau et une pour la tendance) :
+Ces prévisions sont linéaires et sont données par:
+
+
+
+```{r}
+Holt.add=HoltWinters(newdata10,gamma=FALSE, optim.start = c(alpha = 0.3, beta = 0.5),seasonal="add")
+```
+
+Nous pouvons regarder les deux modéle de prédiction:
+
+```{r}
+plot(Holt.add$fitted, col="blue", main="")
+#Holt decomposition
+```
+
+```{r}
+Holt.add$fitted
+```
+\section{La méthode de Holt winters}
+## La méthode de holt winters: Méthode Saisonnière.
+Pour la méthode saisonnière(Holt-Winters), elle met en évidence quatre équations dont une équation de prévision et trois équations de lissage (une pour le niveau, un pour la tendance  
+et un pour la composante saisonnière).
+En plus, il existe deux variantes de cette méthode qui diffèrent par la nature de la composante saisonnière. La méthode additive est préférée lorsque les variations saisonnières sont à peu près constantes tout au long de la série, tandis que la méthode multiplicative est préférée lorsque les variations saisonnières changent proportionnellement au niveau de la série:
+La prédiction est donnée par:
+
+Dans notre cas, nous remarquons que les variations saisonnières changent au cours du temps. Donc à priori, nous préférons la multiplicative.
+
+```{r}
+Winter1<-HoltWinters(newdata10,seasonal="add",optim.start = c(alpha = 0.3, beta = 0.5, gamma=0.7))
+```
+
+
+```{r}
+Winter2<-HoltWinters(newdata10,optim.start = c(alpha = 0.3, beta = 0.5, gamma=0.7), seasonal="mult")
+```
+
+```{r}
+Winter1$fitted
+```
+
+```{r}
+Winter2$fitted
+```
+
+La visualisation des prédiction:
+
+```{r}
+plot(Winter1)
+```
+
+
+```{r}
+plot(Winter2,main="")
+```
+
+```{r}
+plot(Winter1$fitted)
+plot(Winter2$fitted)
+```
+
+#Prediction with Holt-Winters
+
+To plot the predictions made by forecast.HoltWinters(), we can use the “plot.forecast()” function. You specify how many further time points you want to make forecasts for by using the “h” parameter in 
+
+```{r}
+hw_model <- HoltWinters(newdata10)
+library(forecast)
+forecast_hw <- forecast(hw_model, h = 90)  # h = 20 → prévision sur 90 jours
+
+```
+
+```{r}
+autoplot(forecast_hw) +
+  labs(
+    title = "Forecast of the number of earthquakes (Holt-Winters model)",
+    x = "Time",
+    y = "Number of earthquakes"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+library(tidyr)
+
+daily_eq_complete <- daily_eq %>%
+  complete(Date = seq(min(Date), max(Date), by = "day"), 
+           fill = list(n_seismes = 0, mean_magnitude = NA))
+
+newdata10 <- ts(
+  daily_eq_complete$n_seismes,
+  start = c(2018, as.numeric(format(min(daily_eq_complete$Date), "%j"))),
+  frequency = 365
+)
+
+```
+
+```{r}
+library(forecast)
+
+hw_model <- HoltWinters(newdata10)
+forecast_hw <- forecast(hw_model, h = 90)
+
+autoplot(forecast_hw) +
+  labs(title = "Forecast of the number of earthquakes (Holt-Winters model)",
+       x = "Time", y = "Number of earthquakes") +
+  theme_minimal()
+
+```
+#Modèle ARIMA automatique
+```{r}
+arima_model <- auto.arima(newdata10)
+forecast_arima <- forecast(arima_model, h = 90)
+
+autoplot(forecast_arima) +
+  labs(title = "Forecast of the number of earthquakes (ARIMA model)",
+       x = "Time", y = "Number of earthquakes") +
+  theme_minimal()
+
+```
+#Comparaison des performances
+```{r}
+model_comparison <- tibble(
+  Modèle = c("Holt-Winters", "ARIMA"),
+  AIC = c(hw_model$aic %||% NA, AIC(arima_model)),
+  BIC = c(NA, BIC(arima_model))
+)
+
+model_comparison
+
+```
+
+\section{Estimation de l’intensité du séisme, MODELE GLM}
+#Estimation de l’intensité du séisme
+
+```{r}
+library(dplyr)
+
+# Trier par date si nécessaire
+basemayotte <- basemayotte %>% arrange(Date)
+
+# Découpage train/test basé sur la date
+base_train <- basemayotte %>% filter(Date <= as.Date("2021-12-31"))
+base_test  <- basemayotte %>% filter(Date > as.Date("2021-12-31") & Date <= as.Date("2025-10-01"))
+
+# Vérification
+summary(base_train$Date)
+summary(base_test$Date)
+View(base_test)
+```
+
+#Modèle GLM
+```{r}
+glm_model <- glm(Magnitude ~ Latitude + Longitude + Depth,
+                 data = base_train,
+                 family = gaussian())  # intensité continue → famille gaussienne
+summary(glm_model)
+
+```
+
+#Prédiction sur le jeu de test
+```{r}
+predictions <- predict(glm_model, newdata = base_test)
+head(predictions)
+
+# Comparaison
+data.frame(
+  Date = base_test$Date,
+  Observed = base_test$Magnitude,
+  Predicted = predictions
+) %>% head()
+
+```
+
+#Évaluation de la performance
+
+```{r}
+library(Metrics)
+
+rmse(base_test$Magnitude, predictions)      # Erreur quadratique moyenne
+mae(base_test$Magnitude, predictions)       # Erreur absolue moyenne
+
+```
+Erreur sur le jeu d’entraînement vs test
+```{r}
+Pred_mag = predict.lm(glm_model, newdata = base_train)
+MSE.M1 = mean((base_train$Magnitude - Pred_mag)^2)
+
+```
+#Cela calcule bien le MSE sur le jeu d’entraînement, mais pour évaluer la capacité de généralisation, il faut utiliser le jeu de test :
+```{r}
+Pred_mag_test <- predict(glm_model, newdata = base_test)
+MSE_test <- mean((base_test$Magnitude - Pred_mag_test)^2)
+MSE_test
+
+```
+#Graphique des prédictions vs observations
+
+```{r}
+plot(base_test$Date, base_test$Magnitude, type = "l", 
+     xlab = "Date", ylab = "Magnitude",
+     col = "black", lwd = 1.5)
+
+lines(base_test$Date, Pred_mag_test, type = "l", col = "red", lwd = 1.5)
+
+legend("topright", legend = c("Observed magnitude", "Estimated magnitude"),
+       col = c("black", "red"), lty = 1, lwd = 1.5, cex = 0.8)
+
+```
+
+```{r}
+#View(base_train)
+# Chargement des librairies nécessaires
+library(glmnet)
+library(dplyr)
+
+# Supposons que base_train est déjà défini et contient les variables suivantes :
+# base_train$Magnitude (réponse)
+# base_train[, 3:5] -> variables explicatives : Latitude, Longitude, Depth
+
+# Conversion en matrice (glmnet requiert des matrices numériques sans NA)
+x_train <- as.matrix(base_train[, 3:5])
+y_train <- base_train$Magnitude
+
+# Validation croisée pour choisir lambda optimal
+choix_lambda <- cv.glmnet(x_train, y_train, family = "gaussian", alpha = 0)  # alpha=0 => Ridge
+lambda_opt <- choix_lambda$lambda.min
+lambda_opt
+
+# Ajustement du modèle final avec le lambda optimal
+M3 <- glmnet(x_train, y_train, alpha = 0, family = "gaussian", lambda = lambda_opt)
+
+# Affichage des coefficients du modèle
+coef(M3)
+
+```
+```{r}
+print(M3)
+plot(choix_lambda)
+
+```
+#Évaluation du modèle Ridge
+```{r}
+# Prédiction sur le jeu de test
+x_test <- as.matrix(base_test[, 3:5])
+y_test <- base_test$Magnitude
+
+pred_ridge <- predict(M3, newx = x_test)
+
+# Calcul du MSE
+mse_ridge <- mean((y_test - pred_ridge)^2)
+mse_ridge
+
+```
+#Pour comparer avec le GLM simple :
+
+```{r}
+M_glm <- glm(Magnitude ~ Latitude + Longitude + Depth, data = base_train)
+pred_glm <- predict(M_glm, newdata = base_test)
+mse_glm <- mean((base_test$Magnitude - pred_glm)^2)
+
+data.frame(
+  Modèle = c("GLM", "Ridge"),
+  MSE = c(mse_glm, mse_ridge)
+)
+
+```
+#Courbes temporelles : observations vs prédictions (Ridge)
+```{r}
+# Prédictions sur le jeu de test
+x_test <- as.matrix(base_test[, 3:5])
+y_test <- base_test$Magnitude
+pred_ridge <- predict(M3, newx = x_test)
+
+# Tracé des courbes
+plot(y_test, type = "l", col = "black", lwd = 2,
+     xlab = "Time ( test)",
+     ylab = "Magnitude",
+     main = "Observed vs Predicted (Ridge)")
+lines(pred_ridge, col = "red", lwd = 2, lty = 2)
+legend("topright",
+       legend = c("Observed", "Predicted (Ridge)"),
+       col = c("black", "red"), lty = c(1, 2), lwd = 2, cex = 0.9)
+
+```
+
+
+
+```{r}
+library(ggplot2)
+
+df_plot <- data.frame(
+  Observée = y_test,
+  Prédite = as.numeric(pred_ridge)
+)
+
+ggplot(df_plot, aes(x = Observée, y = Prédite)) +
+  geom_point(color = "steelblue", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Magnitude : Observed vs Predicted (Ridge)",
+       x = "Observed Magnitude",
+       y = "Predicted Magnitude")
+
+```
+
+```{r}
+# Sélection du meilleur lambda via validation croisée
+lamlasso <- cv.glmnet(
+  as.matrix(base_train[, 3:5]),
+  base_train$Magnitude,
+  alpha = 1,
+  family = "gaussian"
+)
+
+lambda.opt <- lamlasso$lambda.min
+lambda.opt
+
+# Régression Lasso
+M4 <- glmnet(
+  as.matrix(base_train[, 3:5]),
+  base_train$Magnitude,
+  alpha = 1,
+  family = "gaussian",
+  lambda = lambda.opt
+)
+
+# Coefficients du modèle
+coef(M4)
+
+# Prédictions sur le jeu de test
+Pred_lasso <- predict(M4, newx = as.matrix(base_test[, 3:5]), s = lambda.opt)
+
+# Calcul du Mean Square Error
+MSE.lasso <- mean((base_test$Magnitude - Pred_lasso)^2)
+MSE.lasso
+
+```
+#Graphique 1 : Évolution temporelle
+```{r}
+plot(base_test$Magnitude, type = "l", xlab = "Temps (index)",
+     ylab = "Magnitude", main = "Prediction of the magnitude (Lasso)",
+     col = "black", lwd = 2)
+lines(Pred_lasso, col = "red", lwd = 2, lty = 2)
+legend("topright", legend = c("Observed Magnitude ", "Predicted Magnitude (Lasso)"),
+       col = c("black", "red"), lty = c(1, 2), lwd = 2, cex = 0.9)
+
+```
+```{r}
+plot(base_test$Magnitude, Pred_lasso,
+     pch = 19, col = "blue",
+     xlab = "Magnitude observée",
+     ylab = "Magnitude prédite",
+     main = "Comparaison Observée vs Prédite (Lasso)")
+abline(0, 1, col = "red", lwd = 2, lty = 2)
+
+```
+
+
+```{r}
+library(ggplot2)
+
+df_lasso <- data.frame(
+  Observée = base_test$Magnitude,
+  Prédite = as.numeric(Pred_lasso)
+)
+
+ggplot(df_lasso, aes(x = Observée, y = Prédite)) +
+  geom_point(color = "darkblue", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Lasso Regression : Observée vs Prédite",
+       x = "Magnitude observée",
+       y = "Magnitude prédite")
+
+```
+
+```{r}
+library(FNN)   # kNN regression
+set.seed(123)  # reproductibilité
+
+# kNN regression avec k=1
+modele_kn <- knn.reg(train = base_train[c("Longitude","Latitude","Depth")],
+                     y = base_train$Magnitude,
+                     test = base_test[c("Longitude","Latitude","Depth")],
+                     k = 5)  # k plus grand pour lisser
+
+
+# Résumé
+summary(modele_kn)
+
+# Calcul du MSE sur le jeu de test
+MSE.kn <- mean((base_test$Magnitude - modele_kn$pred)^2)
+MSE.kn
+
+```
+Graphique des prédictions vs observations
+```{r}
+# Courbes temporelles
+plot(base_test$Magnitude, type = "l", col = "black", lwd = 2,
+     xlab = "Temps (index)", ylab = "Magnitude",
+     main = "kNN Regression : Magnitude observed vs predicted")
+lines(modele_kn$pred, col = "blue", lwd = 2, lty = 2)
+
+legend("topright",
+       legend = c("Magnitude (observed)", "Magnitude (predicted) "),
+       col = c("black", "blue"), lty = c(1, 2), lwd = 2, cex = 0.9)
+
+```
+
+```{r}
+# Corrélation magnitude vs longitude
+cor_long <- cor.test(basemayotte$Magnitude, basemayotte$Longitude,
+                     method = "pearson", alternative = "two.sided", conf.level = 0.95)
+cor_long
+
+# Corrélation magnitude vs depth
+cor_depth <- cor.test(basemayotte$Magnitude, basemayotte$Depth,
+                      method = "pearson", alternative = "two.sided", conf.level = 0.95)
+cor_depth
+
+```
+
+
+\section{Analyse de Moran}
+
+```{r}
+# ============================================================
+# 1. Chargement des bibliothèques
+# ============================================================
+library(sf)
+library(spdep)
+library(spatialreg)
+library(ggplot2)
+library(dplyr)
+
+# ============================================================
+# 2. Lecture et préparation des données
+# ============================================================
+# Lecture des GeoPackages
+library(sf)
+
+# Conversion en objets sf à partir des coordonnées
+base_train <- st_as_sf(base_train, coords = c("Longitude", "Latitude"), crs = 4326)
+base_test  <- st_as_sf(base_test,  coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Puis transformation dans le bon CRS pour Mayotte
+base_train <- st_transform(base_train, 4471)
+base_test  <- st_transform(base_test, 4471)
+
+# Vérification
+st_crs(base_train)
+st_crs(base_test)
+```
+
+
+
+
+#Solution : corriger les doublons avant l’analyse
+
+```{r}
+library(dplyr)
+library(sf)
+
+# Identifier et supprimer les doublons géographiques
+coords <- st_coordinates(base_train)
+base_train <- base_train %>%
+  mutate(X = coords[,1], Y = coords[,2])
+base_train_unique <- base_train %>%
+  distinct(X, Y, .keep_all = TRUE)
+# Vérifier combien de doublons ont été retirés
+cat("Nombre d'observations initial :", nrow(base_train), "\n")
+cat("Nombre d'observations uniques  :", nrow(base_train_unique), "\n")
+```
+
+```{r}
+library(dplyr)
+library(sf)
+
+# Identifier et supprimer les doublons géographiques
+coords <- st_coordinates(base_test)
+base_test <- base_test %>%
+  mutate(X = coords[,1], Y = coords[,2])
+base_test_unique <- base_test %>%
+  distinct(X, Y, .keep_all = TRUE)
+# Vérifier combien de doublons ont été retirés
+cat("Nombre d'observations initial :", nrow(base_test), "\n")
+cat("Nombre d'observations uniques  :", nrow(base_test_unique), "\n")
+```
+
+```{r}
+# ============================================================
+# 3. Préparation des coordonnées et voisinages
+# ============================================================
+coords <- st_coordinates(base_train_unique)
+var_spatiale <- base_train_unique$Magnitude   # variable à étudier
+```
+
+```{r}
+# Refaire les calculs des voisins sans doublons
+knn1 <- knn2nb(knearneigh(coords, k = 1))
+knn2 <- knn2nb(knearneigh(coords, k = 2))
+knn3 <- knn2nb(knearneigh(coords, k = 3))
+knn4 <- knn2nb(knearneigh(coords, k = 4))
+
+lw1 <- nb2listw(knn1, zero.policy = TRUE)
+lw2 <- nb2listw(knn2, zero.policy = TRUE)
+lw3 <- nb2listw(knn3, zero.policy = TRUE)
+lw4 <- nb2listw(knn4, zero.policy = TRUE)
+
+```
+
+
+
+```{r}
+# ============================================================
+# 4. Tests globaux de Moran (pour k = 1 à 4)
+# ============================================================
+IM1 <- moran.test(var_spatiale, lw1, zero.policy = TRUE)
+IM2 <- moran.test(var_spatiale, lw2, zero.policy = TRUE)
+IM3 <- moran.test(var_spatiale, lw3, zero.policy = TRUE)
+IM4 <- moran.test(var_spatiale, lw4, zero.policy = TRUE)
+
+Resultat_moran <- data.frame(
+  Voisinage = c("1er", "2e", "3e", "4e"),
+  I_Moran = c(IM1$estimate[1], IM2$estimate[1], IM3$estimate[1], IM4$estimate[1]),
+  P_value = c(IM1$p.value, IM2$p.value, IM3$p.value, IM4$p.value)
+)
+print(Resultat_moran)
+
+# Interprétation automatique
+if (any(Resultat_moran$P_value < 0.05)) {
+  cat("\n✅ Autocorrélation spatiale significative détectée (p < 0.05)\n")
+} else {
+  cat("\n❌ Pas d'autocorrélation spatiale significative\n")
+}
+```
+
+
+```{r}
+# ============================================================
+# 5. Visualisation des diagrammes de Moran
+# ============================================================
+
+moran.plot(var_spatiale, lw1, labels=FALSE, main="k=1", col="blue", pch=20)
+#moran.plot(var_spatiale, lw2, labels=FALSE, main="k=2", col="blue", pch=20)
+#moran.plot(var_spatiale, lw3, labels=FALSE, main="k=3", col="blue", pch=20)
+#moran.plot(var_spatiale, lw4, labels=FALSE, main="k=4", col="blue", pch=20)
+```
+
+```{r}
+W22 <- knearneigh(coords)
+W22 <- knn2nb(W22)
+diste <- unlist(nbdists(W22, coords))
+up <- max(diste)
+
+near5 <- dnearneigh(coords, 0, up)
+lw_dist <- nb2listw(near5, zero.policy = TRUE)
+
+```
+
+```{r}
+library(spdep)
+# --- Test de Moran ---
+# var_spatiale = ta variable d'intérêt (par ex. Magnitude)
+Moran_test <- moran.test(var_spatiale, listw = lw_dist, 
+                         alternative = "two.sided",
+                         randomisation = FALSE,
+                         zero.policy = TRUE)
+
+# Affichage des résultats
+print(Moran_test)
+
+# --- Moran plot ---
+moran.plot(var_spatiale, listw = lw_dist, labels = FALSE, 
+           pch = 20, col = "blue", xlab = "Valeurs centrées", 
+           ylab = "Valeurs pondérées par les voisins")
+
+```
+
+##Modelisation
+```{r}
+library(sf)
+library(spdep)
+library(spatialreg)
+library(ggplot2)
+library(dplyr)
+
+# Coordonnées de base_train
+coords_train <- st_coordinates(base_train_unique)
+
+# Construction du voisinage k=1 (tu peux changer k)
+# Construction du voisinage k=1
+knn_train <- knn2nb(knearneigh(coords_train, k = 1))
+
+# Liste de poids spatiaux
+lw_train <- nb2listw(knn_train, style="W", zero.policy=TRUE)
+```
+
+```{r}
+base_train_unique
+lw_train
+```
+
+```{r}
+# Modèle SAR sur la variable Magnitude
+# Ici : Magnitude ~ Latitude + Longitude + Depth (exemple)
+sar_model <- lagsarlm(Magnitude ~ X + Y + Depth + Year,
+                      data = base_train_unique,
+                      listw = lw_train,
+                      zero.policy = TRUE)
+```
+
+
+```{r}
+summary(sar_model)
+```
+
+
+```{r}
+# Résidus
+base_train_unique$residuals <- residuals(sar_model)
+
+# Valeurs ajustées
+base_train_unique$predicted <- fitted(sar_model)
+
+# Carte des résidus
+ggplot(base_train_unique) +
+  geom_sf(aes(color = residuals), size = 2) +
+  scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0) +
+  theme_minimal() +
+  labs(title="Résidus du modèle SAR - base_train",
+       color="Résidus")
+```
+
+
+```{r}
+# Carte des prédictions
+ggplot(base_train_unique) +
+  geom_sf(aes(color = predicted), size = 2) +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title="Prédictions du modèle SAR - base_train",
+       color="Magnitude prédite")
+# Coordonnées de test
+coords_test <- st_coordinates(base_test_unique)
+```
+
+
+```{r}
+# Matrice de voisinage pour le test
+# On peut réutiliser le voisinage basé sur le train (proche voisins)
+knn_test <- knn2nb(knearneigh(coords_test, k=1))
+lw_test <- nb2listw(knn_test, style="W", zero.policy=TRUE)
+
+# Prédictions sur le test
+base_test_unique$predicted <- predict(sar_model, newdata=base_test_unique, listw=lw_test)
+
+# Visualisation des prédictions
+ggplot(base_test_unique) +
+  geom_sf(aes(color = predicted), size=2) +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title="Prédictions SAR - base_test", color="Magnitude prédite")
+```
+
+
+```{r}
+library(ggplot2)
+library(sf)
+library(viridis)
+
+# Vérifier le CRS : tout doit être identique (lon/lat ou métrique)
+st_crs(base_train_unique)
+st_crs(myt_contour_lonlat)
+```
+
+
+```{r}
+# Carte des résidus avec contour de Mayotte
+ggplot() +
+  geom_sf(data = myt_contour_lonlat, fill = NA, color = "black") +  # contours
+  geom_sf(data = base_train_unique, aes(color = residuals), size = 2) + # points résidus
+  scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0) +
+  theme_minimal() +
+  labs(title="Résidus du modèle SAR - base_train", color="Résidus")
+ggplot() +
+  geom_sf(data = myt_contour_lonlat, fill = NA, color = "black") +  # contours
+  geom_sf(data = base_train_unique, aes(color = predicted), size = 2) + # points prédictions
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title="Prédictions du modèle SAR - base_train", color="Magnitude prédite")
+
+ggplot() +
+  geom_sf(data = myt_contour_lonlat, fill = NA, color = "black") +
+  geom_sf(data = base_test_unique, aes(color = predicted), size = 2) +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title="Prédictions SAR")
+```
+
+
+
+
+```{r}
+# ============================================================
+# 7. Modèle SAR (Spatial Autoregressive Model)
+# ============================================================
+# Exemple : Magnitude expliquée par Profondeur
+sar_model <- lagsarlm(Magnitude ~X+Y+Depth, data = base_train_unique, listw = lw1)
+summary(sar_model)
+
+# Ajout des résidus
+base_train$residus <- residuals(sar_model)
+
+# ============================================================
+# 8. Visualisation spatiale des résidus
+# ============================================================
+ggplot(base_train_unique) +
+  geom_sf(aes(fill = residus), color = NA) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  labs(title = "Résidus du modèle SAR (k=4)",
+       fill = "Résidu") +
+  theme_minimal()
+```
+
+
+```{r}
+# ============================================================
+# 9. Analyse complémentaire : Moran local (LISA)
+# ============================================================
+local_moran <- localmoran(var_spatiale, lw1)
+base_train_unique$Ii  <- local_moran[,1]
+base_train_unique$Z_I <- scale(base_train$Ii)
+
+ggplot(base_train_unique) +
+  geom_sf(aes(fill = Z_I)) +
+  scale_fill_viridis_c(option = "magma") +
+  labs(title = "Indice local de Moran (Z-score)",
+       fill = "Z(I)") +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+\section{Modèle econometries spatiale}
+
+```{r}
+#Deuxième modèle: Modèle SAR
+model.SAR<- lagsarlm(Magnitude~Latitude+Longitude,data=dftrain, listw=kntrain)
+summary(model.SAR)
+```
+
+```{r}
+impactSAR <- impacts(model.SAR, listw = kntrain, R = 100)
+impactSAR
+```
+
+
+#Le coefficient d'autocorrélation spatial $\rho$, qui illustre la dÃ©pendance spatiale de l'intensitÃ© du tremblement est signicatif et est estimÃ© $0.11093$. La latitude et la profondeur ont bien des impacts positifs sur l'intensitÃ© du sÃ©isme. La variation de ces variables pour un Ã©picentre donnÃ©e affecte positivement de faÃ§on direct son intensitÃ© et indirectement les intensitÃ©s de tous les autres Ã©picentres. Parcontre la longitude affectera nÃ©gativement que Ã§a soit directement ou indirectement l'intensitÃ©.
+```{r}
+#Pour k=2
+#names(dftrain)
+model.SAR2<- lagsarlm(Magnitude~Latitude+Longitude+Depth,data=dftrain, listw=kntrain,type="lag",method="eigen")
+summary(model.SAR2)
+```
+
+
+```{r}
+library(spdep)
+
+# Estimation du modèle SAR2
+model.SAR2 <- lagsarlm(Magnitude ~ Latitude + Longitude + Depth, data = dftrain, 
+                       listw = kntrain, type = "lag", method = "eigen")
+summary(model.SAR2)
+```
+
+
+```{r}
+#View(dftest) pas bon
+# Prédiction avec le modèle SAR2
+#pred_model.SAR <- predict.lagsarlm(model.SAR2, newdata = dftrain, listw = kntrain)
+#pred_model.SAR
+```
+
+
+
+
+```{r}
+#plot(dftest$Magnitude, type="l", xlab="Magnitude")
+#lines(pred_model.SAR, type='l', col='blue')
+#title(main="Prediction")
+```
+
+
+```{r}
+#Troisième modèle: SEM
+#Ce modèle comporte un décalage spatial sur les erreurs. Il s'écrit de la forme:
+#Nous l'estimons comme suit:
+model.sem1<-errorsarlm(Magnitude~Latitude+Longitude,data=dftrain,kntrain)
+summary(model.sem1)
+```
+
+
+```{r}
+model.sem2<-errorsarlm(Magnitude~Longitude+Latitude+Depth,data=dftrain,kntrain)
+summary(model.sem2)
+```
+
+```{r}
+# Prédictions avec model.sem2
+pred_model.sem2 = predict(model.sem2, newdata = dftrain, listw = kntrain, pred.type = "TS")
+pred_model.sem2
+
+# Prédictions avec model.sem1
+pred_model.sem1 = predict(model.sem1, newdata = dftrain, listw = kntrain, pred.type = "TS")
+pred_model.sem1
+
+# Visualisation des résultats
+par(mfrow = c(1, 2))
+
+# Visualisation des données d'entraînement avec les valeurs ajustées
+plot(dftrain$Magnitude, type = 'l', main = "Entrainement")
+lines(model.sem1$fitted.values, type = 'l', col = 'red')
+
+# Visualisation des prédictions
+#plot(dftest$Magnitude, type = "l", main = "Prédiction")
+#lines(pred_model.sem1, type = 'l', col = 'blue')  # Utiliser pred_model.sem1 ici
+
+```
+
+```{r}
+dftest=df22
+#Nous obtenons ici une relation négative entre l'intensitéet la longitude, mais positive pour le la latitude et la profondeur des Ã©picentres. L'effet d'aucorrÃ©lation spatiale des erreurs $\lambda$ est estimÃ© Ã  $0.1644$ qui est signicatif. . LâinterprÃ©tation de ce modÃ¨le SEM se limite aux effets directs.
+
+#Regardons maintenant la qualité de prédiction:
+  
+pred_model.sem2=predict(model.sem2, newdata=dftrain,
+                       listw=kntrain, pred.type = "TS")
+pred_model.sem2
+
+#Regardons maintenant la qualité de prédiction:
+
+pred_model.sem1=predict(model.sem1, newdata=dftest,
+                       listw=kntrain, pred.type = "TS")
+pred_model.sem1
+
+#Visualisation 
+par(mfrow=c(1,2))
+plot(dftrain$Magnitude, type='l')
+lines(model.sem1$fitted.values, type='l', col='red')
+title(main="Entrainement")
+plot(dftest$Magnitude, type="l")
+lines(pred_model.sem, type='l', col='blue')
+title(main="Prédiction")
+```
+
+
+```{r}
+## Quatrième modèle: Modéle SDM
+#Ce modèle spatiale Durbin est le modèle sans contraint. Nous mettons un décalage spatial non seulement sur les variables explicatives mais aussi sur la variable endogÃ¨ne.
+#Il se peut qu'il y est deux matrices pour chaque décalage mais mettrons seulement la matrice du 1er plus proches voisins. Ce choix est justifiÃ© par une possibilitÃ© d'effet de contagion.
+
+model.SDM<-lagsarlm(Magnitude~Longitude+Latitude,data=dftrain, listw=kntrain, type="mixed")
+#Deph non significatif
+summary(model.SDM)
+
+model.SDM1<-lagsarlm(Magnitude~Latitude+Depth,data=dftrain, listw=kntrain, type="mixed")
+#Deph non significatif
+summary(model.SDM1)
+
+#Nous pouvons observer les impacts directs et indirects.
+#imapact.SDM=impacts(model.SDM, listw=kn1train, R=100)
+#imapact.SDM
+
+#Avec un coefficient d'autocorrélation de $0.16749$ et d'interaction exogÃ¨ne de $0.019$, 
+#nous constatons qu'avec un dÃ©calage spatial, la longitude Ã  un effet direct positif sur l'intensitÃ© et des effets indirects nÃ©gatifs. Les deux coordonnÃ©es gÃ©ographiques changent d'effets s'il y'a un dÃ©calage.
+
+pred_model.SDM=predict(model.SDM1, newdata=dftrain, listw=kntrain, pred.type ="TS",legacy.mixed = TRUE)
+
+pred_model.SDM
+
+par(mfrow=c(1,2))
+plot(dftrain$Magnitude, type='l')
+lines(model.SDM$fitted.values, type='l', col='red')
+title(main="Entrainement")
+#plot(dftest$Magnitude, type="l")
+#lines(pred_model.sem, type='l', col='green')
+#title(main="Prédiction")
+```
+
+
+```{r}
+#Modele SAC/SARRAR
+model.sac<-sacsarlm(Magnitude~Longitude+Latitude+Depth,data=dftrain, listw=kntrain, type="sac")
+summary(model.sac)
+
+model.sac1<-sacsarlm(Magnitude~Longitude+Latitude,data=dftrain, listw=kntrain, type="sac")
+summary(model.sac1)
+
+model.sac2<-sacsarlm(Magnitude~Longitude+Latitude,data=dftrain, listw=kntrain,listw2=kntrain, type="sac")
+summary(model.sac2)
+```
+
+
+```{r}
+#Modèle SLX
+library(Matrix)
+library(spatialreg)
+model.SLX<-lmSLX(Magnitude~Longitude+Latitude, data=dftrain, listw=kntrain)
+summary(model.SLX)
+
+impactSLX=impacts(model.SLX)
+
+### Modèle Manski
+modele.manski<-sacsarlm(Magnitude~Longitude+Latitude+Depth, data=dftrain, listw=kn1train, type="sacmixed")
+summary(modele.manski)
+
+```
+
+```{r}
+# iter <- 1
+# plots <- lapply(magnitude_myt,
+#   function(df){
+#     p <- df %>% ggplot() + 
+#       geom_tile(aes(Longitude, Latitude, fill = var1.pred)) + 
+#       scale_fill_gradient2(low = "yellow", mid = "orange", high = "red", midpoint = 3) + 
+#       geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 0.1) +
+#       facet_wrap(~Month) + ggtitle(names(magnitude_myt)[iter]) 
+#     
+#     p$labels$fill <- "Predicted\nmagnitude"
+#     
+#     ggsave(paste0("./Earthquake_folder/", 
+#                   paste0("predictions_for_", names(magnitude_myt)[iter], ".png")), plot = p,
+#            width = 12)
+#     iter <<- iter + 1
+#     p
+#   }
+# )
+# plots 
+```
+
+## To carry out the Cross validation we need to compute error. A procedure is Leave-One-out-cross-validation (LOOCV page 109 of Wikle and Cressie, spatio-temporal statistics with R)
+
+```{r}
+# # library(parallel)
+# Wt_fun <- function(theta, dist_mat) 1/dist_mat^theta 
+# Wt_Gauss <- function(theta, dist_mat) exp(-dist_mat^2/theta)
+# 
+# LOOCV_score <- function(Wt_fun, theta, dist_mat, Z) { 
+#   Wtilde <- Wt_fun(theta, dist_mat)
+#   CV <- 0
+#   for(i in 1:length(Z)) {
+#     Wtilde2 <- Wtilde[i,-i]
+#     W2 <- Wtilde2/sum(Wtilde2) 
+#     z_pred <- W2 %*% Z[-i]  #generic kernel smoothing
+#     CV[i] <- (z_pred - Z[i])^2
+#   }
+#   mean(CV)
+# }
+# 
+# pred_obs_dist_mat <- basemayotte %>% split(., .$Year_num) %>% lapply(
+#   function(Year_df){
+#     dist_mat <- rdist(dplyr::select(pred_grid, Longitude, Latitude, Month_num), 
+#                       dplyr::select(basemayotte %>% filter(Year_num == unique(Year_df$Year_num)), 
+#                                     Longitude, Latitude, Month_num))
+#     dist_mat
+#     }
+# )
+# 
+# Wt_IDW <- function(theta, dist_mat) 1/dist_mat^theta 
+# Wtilde <- lapply(pred_obs_dist_mat, FUN = Wt_IDW, theta = 5)
+# Wtilde_rsums <- lapply(Wtilde, rowSums) 
+# W <- list()
+# z_pred_IDW <- list()
+# 
+# for (k in 1:length(Wtilde_rsums)) {
+#   W[[k]] <- Wtilde[[k]]/Wtilde_rsums[[k]]
+#   magnitude <- basemayotte$Magnitude[basemayotte$Year_num == names(Wtilde_rsums)[k]]
+#   # predictions
+#   z_pred_IDW[[k]] <- as.numeric(W[[k]] %*% magnitude)
+# }
+```
+
+
+```{r}
+# summaries <- list()
+# for (k in 1:length(Wtilde_rsums)) {
+#   summaries[[k]] <- summary(magnitude_myt[[k]]$var1.pred - z_pred_IDW[[k]])
+# }
+# names(summaries) <- names(magnitude_myt)
+# summaries
+```
+
+Les differences sont nulles. Ce qui confirme que la function IDW fait vraiment ce qu'il faut. 
+
+Erreur de prediction pour le model qui prend en compte toutes les annees
+```{r}
+# pred_obs_dist_mat2 <- dist_mat <- rdist(
+#   dplyr::select(pred_grid2, Longitude, Latitude, Year_month), basemayotte)
+# 
+# Wt_IDW <- function(theta, dist_mat) 1/dist_mat^theta 
+# Wtilde <- lapply(pred_obs_dist_mat, FUN = Wt_IDW, theta = 5)
+# Wtilde_rsums <- lapply(Wtilde, rowSums) 
+# W <- list()
+# z_pred_IDW <- list()
+# 
+# for (k in 1:length(Wtilde_rsums)) {
+#   W[[k]] <- Wtilde[[k]]/Wtilde_rsums[[k]]
+#   magnitude <- basemayotte$Magnitude[basemayotte$Year_num == names(Wtilde_rsums)[k]]
+#   # predictions
+#   z_pred_IDW[[k]] <- as.numeric(W[[k]] %*% magnitude)
+# }
+```
+
+
+# Generic kernel smoothing (Codes pour genérer le modèle spatio-temporel directement, interessant d'avoir le contrôle sur le code)
+```{r}
+# # Generic Kernel Smoothing and Cross-Validation
+# theta <- 0.5 # set bandwidth
+# Wt_Gauss <- function(theta, dist_mat) exp(-dist_mat^2/theta) 
+# 
+# Wtilde <- lapply(pred_obs_dist_mat, FUN = Wt_Gauss, theta = 1.5)
+# Wtilde_rsums <- lapply(Wtilde, rowSums) 
+# 
+# W <- list()
+# z_pred_Gauss <- list()
+# 
+# for (k in 1:length(Wtilde_rsums)) {
+#   W[[k]] <- Wtilde[[k]]/Wtilde_rsums[[k]]
+#   magnitude <- basemayotte$Magnitude[basemayotte$Year_num == names(Wtilde_rsums)[k]]
+#   # predictions
+#   z_pred_Gauss[[k]] <- as.numeric(W[[k]] %*% magnitude)
+# }
+# 
+# 
+# ts.plot(data.frame(Gauss = z_pred_Gauss[[4]], IDW = z_pred_IDW[[4]]), col = c(1,2))
+# 
+# 
+# # comparison plots
+# cplots <- list()
+# 
+# for (k in 1:length(Wtilde_rsums)) {
+#   df <- data.frame(Gauss = z_pred_Gauss[[k]], 
+#                    Month = magnitude_myt[[k]]$Month_num,
+#                    Longitude = magnitude_myt[[k]]$Longitude,
+#                    Latitude = magnitude_myt[[k]]$Latitude)
+#   
+#   cplots[[k]] <- df %>% 
+#     ggplot() + 
+#     geom_tile(aes(Longitude, Latitude, fill = Gauss)) +
+#     scale_fill_gradient2(low = "green", mid = "darkorange", high = "red", midpoint = 3) + 
+#     geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 0.1) +
+#     facet_wrap(~Month) + ggtitle(names(magnitude_myt)[k]) 
+#   
+#   cplots[[k]]$labels$fill <- "Predicted\nmagnitude"
+#   
+#   ggsave(paste0("./Earthquake_folder/", 
+#                 paste0("predictions_for_Gauss", names(magnitude_myt)[k], ".png")), 
+#          plot = cplots[[k]], width = 12)
+# }
+# 
+# cplots
+```
+
+
+
+
+## Search for obtimal parameters
+```{r}
+# LOOCV_score(Wt_fun, theta = 0.1, dist_mat = pred_obs_dist_mat[[1]], Z = basemayotte$Magnitude[basemayotte$Year_num == 2018])
+# LOOCV_score(Wt_Gauss, theta = 0.1, dist_mat = pred_obs_dist_mat[[1]], Z = basemayotte$Magnitude[basemayotte$Year_num == 2018])
+# 
+# theta_IDW <- seq(4, 6, length = 21) 
+# theta_Gauss <- seq(0.1, 2.1, length = 21)
+# 
+# CV_IDW <- sapply(theta_IDW, function(tt){
+#   LOOCV_score(Wt_fun, theta = tt, dist_mat = pred_obs_dist_mat[[1]], 
+#               Z = basemayotte$Magnitude[basemayotte$Year_num == 2018])
+# })
+# 
+# 
+# CV_Gauss <- sapply(theta_Gauss, function(tt){
+#   LOOCV_score(Wt_Gauss, theta = tt, dist_mat = pred_obs_dist_mat[[1]], 
+#               Z = basemayotte$Magnitude[basemayotte$Year_num == 2018])
+# })
+# 
+# 
+# plot(theta_IDW, CV_IDW, type = "b")
+# plot(theta_Gauss, CV_Gauss, type = "b")
+```
+
+
+```{r}
+# par(mfrow = c(1,2)) 
+# plot(theta_IDW, CV_IDW,
+#      xlab = expression(alpha),
+#      ylab = expression(CV[(m)](alpha)), type = 'o')
+# 
+# plot(theta_Gauss, CV_Gauss,
+#      xlab = expression(theta),
+#      ylab = expression(CV[(m)](theta)), type = 'o')
+```
+
+
+
+```{r}
+#theta_IDW[which.min(CV_IDW)]
+```
+
+
+```{r}
+# library(caret)
+# folds <- createFolds(basemayotte$Magnitude, k = K)
+# 
+# CV_error <- c()
+# MSPE <- c()
+# for (K in 2:10) {
+#   folds <- createFolds(basemayotte$Magnitude, k = K)
+#   for (k in 1:length(folds)){
+#     train_base <- basemayotte[-folds[[k]],]
+#     test_base <- basemayotte[folds[[k]],]
+#   
+#     model <- train(Magnitude ~ Longitude + Latitude + Profondeur, data = train_base, method = "lm")
+#     predictions <- predict(model, test_base)
+#   
+#     MSPE[k] <- mean((test_base$Magnitude - predictions)^2)
+#   }
+#   
+#   CV_error <- c(CV_error, mean(MSPE))
+# }
+# 
+# 
+# 
+# plot(2:10, CV_error, type = "b")
+```
+
+
+
+
+```{r}
+
+# -----------------------------------------------------------------------------#
+# LISTE DES FONCTIONS UTILES A NOS ANALYSES
+# -----------------------------------------------------------------------------#
+
+
+minuscule <- function(x){
+  sapply(x, function(xx){
+    xx <- tolower(xx)
+    xx <- strsplit(xx, split = "")[[1]]
+    xx[1] <- toupper(xx[1])
+    xx <- paste0(xx, collapse = "")
+    xx
+  }) %>% as.character()
+}
+
+missing_cols <- function(x, trhld = 0.9) {
+  idx <- which(colMeans(is.na(x)) >= trhld)
+  x <- x[-idx]
+  x
+}
+
+
+convert_hm <- function(x){
+  y <- character()
+  # which x is not a number
+  y[grepl("[0-9]H[0-9]", x)] <- paste0(gsub("H", ":", x[grepl("[0-9]H[0-9]", x)]), ":00")
+  a <- as.character(structure(as.integer(86400*as.numeric(x[!grepl("[0-9]H[0-9]", x)])), class="ITime"))
+  y[!grepl("[0-9]H[0-9]", x)] <- a
+  # y <- hms(y, roll = TRUE)
+  y
+}
+
+
+# convert_hm(x)
+count_zeros <- function(x, na.rm = FALSE){
+  if (na.rm){
+    x <- x[!is.na(x)]
+  } 
+  
+  id1s <- c(0, which(x == 1), length(x) + 1)
+  longest_run <- max(diff(id1s)) - 1
+  
+  longest_run
+}
+
+
+all_zeros <- function(x, na.rm = FALSE){
+  if (na.rm){
+    x <- x[!is.na(x)]
+  } 
+  sum(x == 0)
+}
+
+# a <- count_zeros(sample(0:1, size = 20, replace = TRUE))
+
+# fonction qui compte le nombre max de jours sans pluies
+comptage_0 <- count_zeros
+
+nsp_max <- function(x, period = 7){
+  n <- length(x)
+  jumps <- seq(1, n, by = period)
+  nval_y <- c()
+  
+  for (i in 1:(length(jumps)-1)){
+    y <- x[(jumps[i]):(jumps[i+1]-1)]
+    nval_y <- c(nval_y, comptage_0(y))
+  }
+  
+  nval_y
+}
+
+# bind_cols(dates = dates, x = x, cumul = cumulate(dates, x, 14)$cumul, maxj_sp = cumulate(dates, x, 14)$maxj_sp) %>% View()
+
+# special function that will calculate the sum of and will return NA where all
+# are NA and sum with na.rm = TRUE where there is non-NA value in list
+
+sp_sum <- function(x){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    sum(x, na.rm = TRUE)
+  }
+}
+
+sp_mean <- function(x){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    mean(x, na.rm = TRUE)
+  }
+}
+
+sp_d <- function(x){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    sd(x, na.rm = TRUE)
+  }
+}
+
+
+sp_func <- function(x, fun = mean){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    fun(x, na.rm = TRUE)
+  }
+}
+
+
+# distance euclidienne
+eucl_dist <- function(x, y) {
+  sqrt(sum((x-y)^2))
+}
+
+r_dist <- function(x, y){
+  d2 <- apply(x, 1, function(xx){
+    apply(y, 1, function(y){
+      eucl_dist(xx, y)
+    })
+  })
+  d2
+}
+
+# cette function trouve les points les plus proches de x dans la base df a 
+# partir de la distance
+# @new_x: le nouveau point
+# @df: la base de donnees contenant les n points
+# @k: le nombre de proches voisins
+
+knn_match <- function(new_x, df, x.name = "X", y.name = "Y", 
+                      var_name = "commune", k = 1,
+                      display_all = TRUE){
+  n <- nrow(new_x)
+  colnames(new_x) <- paste0("new_", names(new_x))
+  df_xy <- df[, c(x.name, y.name)]
+  
+  if (n == 1){
+    d <- apply(df_xy, 1, function(y){
+      eucl_dist(new_x, y)
+    })
+    
+    id_neighbors <- order(d)[1:k]
+    df_newx <- bind_cols(new_x, df[id_neighbors,])
+    df_newx
+  } else {
+    # for each new_x do what was done above
+    for (i in 1:n){
+      x <- new_x[i,]
+    }
+    df_newx <- apply(new_x, 1, function(x){
+      d <- apply(df_xy, 1, function(y){
+        eucl_dist(x, y)
+      })
+      id_neighbors <- order(d)[1:k]
+      bind_cols("new_X" = x[1], "new_Y" = x[2], df[id_neighbors,])
+    }) %>% bind_rows()
+    
+    if (display_all){
+      df_newx
+    } else {
+      df_newx %>% split(., .$new_X) %>% 
+        lapply(function(x){
+          classes <- x[[var_name]]
+          # find the modal class
+          mod_class <- which.max(table(classes)) %>% names() %>% sample(., size = 1)
+          x %>% filter_(paste0(var_name, " == " , "'", mod_class, "'")) %>% 
+            .[1,]
+        }) %>% bind_rows()
+    }
+  }
+}
+
+
+# use knn_match to add covariates to a grid
+add_covariates <- function(grid, data){
+  res <- knn_match(grid, data)
+  res <- res %>% dplyr::select(-X, -Y, X = new_X, Y = new_Y)
+  res
+}
+
+
+# fix year of a date
+fix_year <- function(new_year, x){
+  x <- ymd(x)
+  
+  year(x) <- new_year
+  x
+}
+
+
+min_max <- function(x, na.rm = TRUE){
+  (x - min(x, na.rm = na.rm))/(max(x, na.rm = na.rm) - min(x, na.rm = na.rm))
+}
+
+# getting coordinate limits 
+get_coord_limits <- function(x, y){
+  list(lon = c(min = min(x), max = max(x)),
+       lat = c(min = min(y), max = max(y))
+  )
+}
+
+# new version of scale
+scale_new <- function(x){
+  sapply(x, function(a){
+    scale(a[!is.na(a)])
+  })
+}
+
+
+
+## 
+nlastdays_cumul <- function(x, h = 7, FUN = sum, probs = NULL){
+  n <- length(x)
+  cumx <- c()
+  
+  for (i in 1:(n)){
+    if ((i-h+1) < 0){
+      if (identical(FUN, quantile)){
+        cumx[i] <- FUN(x[i:1], probs = probs)
+      } else {
+        cumx[i] <- FUN(x[i:1])
+      }
+      
+    } else {
+      if (identical(FUN, quantile)){
+        cumx[i] <- FUN(x[(i-h+1):i], probs = probs)
+      } else {
+        cumx[i] <- FUN(x[(i-h+1):i])
+      }
+    }
+  }
+  return(cumx)
+}
+
+
+consecdays_quantile <- function(x, h = 7, FUN = count_zeros, probs = NULL, direction = ">="){
+  n <- length(x)
+  cumx <- c()
+  for (i in 1:(n)){
+    if ((i-h+1) < 0){
+      z <- quantile(x[i:1], probs = probs)
+      if (direction == ">="){
+        cumx[i] <- FUN(1 - (x[i:1] >= z))
+      } 
+      
+      if (direction == ">") {
+        cumx[i] <- FUN(1 - (x[i:1] > z))
+      }
+      
+      if (direction == "<=") {
+        cumx[i] <- FUN(1 - (x[i:1] <= z))
+      }
+      
+      if (direction == "<") {
+        cumx[i] <- FUN(1 - (x[i:1] < z))
+      }
+    } else {
+      z <- quantile(x[(i-h+1):i], probs = probs)
+      if (direction == ">="){
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] >= z))
+      } 
+      
+      if (direction == ">") {
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] > z))
+      }
+      
+      if (direction == "<=") {
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] <= z))
+      }
+      
+      if (direction == "<") {
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] < z))
+      }
+    }
+  }
+  return(cumx)
+}
+
+
+# kernel functions
+Wt_IDW <- function(theta, dist_mat) 1/dist_mat^theta
+Wt_IDW_gauss <- function(theta, dist_mat) exp(-dist_mat^2/theta)
+
+# Leave-One-Out Cross-Validation
+LOOCV_score <- function(Wt_fun, theta, dist_mat, Z) { 
+  Wtilde <- Wt_fun(theta = theta, dist_mat = dist_mat)
+  CV <- 0
+  # Zi <- c()
+  for(i in 1:length(Z)) {
+    Wtilde2 <- Wtilde[i,-i]
+    W2 <- Wtilde2 / sum(Wtilde2) 
+    z_pred <- W2 %*% Z[-i] 
+    # Zi[i] <- z_pred
+    CV[i] <- (z_pred - Z[i])^2
+  }
+  
+  mean(CV, na.rm = TRUE)
+}
+
+best_tune <- function(theta_vect, FUN, df, x, y){
+  # eliminate non-varying columns
+  
+  df_minmaxed <- df %>% ungroup() %>% filter_(paste0("!is.na(", y,")")) %>% 
+    dplyr::select(all_of(x)) %>% 
+    sapply(min_max) %>% data.frame()
+  
+  d <- rdist(df_minmaxed, df_minmaxed)
+  
+  a <- sapply(theta_vect, function(theta) {
+    LOOCV_score(Wt_fun = FUN, 
+                theta = theta, 
+                dist_mat = d, 
+                Z = df %>% filter_(paste0("!is.na(", y,")")) %>% .[[y]])
+  })
+  
+  list(
+    dist_mat = d,
+    theta_vect = theta_vect,
+    RMSE = sqrt(a),
+    best_tune = theta_vect[which.min(a)]
+  )
+}
+
+
+LOOCV_GAM <- function(f, df, Z, family = poisson(), method = "REML", trControl = NULL){
+  CV <- lapply(1:length(Z), function(i){
+    # cat("Iteration", i, "\n")
+    m <- mgcv::gam(f, df[-i,], method = method, family = family, trControl = trControl)
+    z_pred <- exp(predict(m, df)[i])
+    (z_pred - Z[i])^2
+  })
+  mean(unlist(CV))
+}
+
+# LOOCV_USTK <- function(f, df, Z){
+#   CV <- lapply(1:length(Z), function(i){
+#     # cat("Iteration", i, "\n")
+#     m <- mgcv::gam(f, df[-i,], method = method, family = family, trControl = trControl)
+#     z_pred <- exp(predict(m, df)[i])
+#     (z_pred - Z[i])^2
+#   })
+#   mean(unlist(CV))
+# }
+
+
+myt_contour_lonlat <- st_transform(myt_map_commune, "+proj=longlat +ellps=WGS84 +datum=WGS84") %>% st_union()
+
+
+get_grid <- function(m, length = 50){
+  coords <- st_coordinates(st_geometry(m))
+  coord_lim <- get_coord_limits(x = coords[, "X"], y = coords[, "Y"])
+  
+  myt_grid <- expand.grid(Longitude = seq(coord_lim$lon[1], coord_lim$lon[2], length = length), 
+                          Latitude = seq(coord_lim$lat[1], coord_lim$lat[2], length = length))
+  
+  expanded_grid <- myt_grid
+  myt_grid_sf <- st_as_sf(myt_grid, coords = c("Longitude", "Latitude"), crs = "EPSG:4471")
+  
+  # myt_grid_sf <- st_transform(myt_grid_sf, "+proj=longlat +ellps=WGS84 +datum=WGS84")
+  myt_grid_sf <- st_transform(myt_grid_sf, crs = st_crs(m))
+  intersections <- st_intersects(myt_grid_sf$geometry, m)
+  
+  myt_grid_sf$commune <- m$commune[as.integer(intersections)]
+  expanded_grid$commune <- m$commune[as.integer(intersections)]
+  
+  myt_grid_sf <- bind_cols(myt_grid_sf, st_coordinates(myt_grid_sf))
+  
+  list(grid_sf = myt_grid_sf,
+       grid = expanded_grid %>% rename(X = "Longitude", Y = "Latitude"))
+}
+
+
+idw.predict <- function(df, x, y, FUN, theta = 5){
+  Y <- df %>% ungroup() %>% dplyr::select(all_of(x)) %>% 
+    sapply(min_max) %>% data.frame() %>% 
+    mutate_(paste0("y = df[y]"))
+  
+  Y_train <- Y %>% filter_(paste0("!is.na(", y,")"))
+  
+  # distance
+  d <- rdist(Y[x], Y_train[x])
+  N <- nrow(d)
+  
+  # adjustment
+  d <- (d*(N-1) + 1/20)/N
+  
+  # weight calculation
+  Wtilde <- FUN(theta = theta, dist_mat = d)
+  W <- Wtilde/rowSums(Wtilde)
+  
+  # predictions
+  preds <- as.numeric(W %*% as.numeric(as.matrix(Y_train[,y])))
+  preds
+}
+
+
+# climate_week_waste <- read_excel("./1. Egg_Resuls/CleanedData/climate_week_waste2.xlsx") %>% 
+#   dplyr::select(-X, -Y)
+
+get_predictions <- function(year, theta, df, map_grid, x, y, FUN, midpoint = NULL, climatedata, count_max = NULL){
+  # climate_week_waste <- climate_week %>% 
+  #   left_join(total_waste_week, by = c("NAME"="commune", "Year", "Week")) %>% 
+  #   fill(waste_number, .direction = "down") %>% 
+  #   filter(Year %in% year) %>% suppressWarnings()
+  wks <- unique(df$Week)
+  
+  if ("X" %in% names(climatedata)) climatedata$X = NULL
+  if ("Y" %in% names(climatedata)) climatedata$Y = NULL
+  
+  climatedata$Week <- week(climatedata$DATE)
+  climatedata <- climatedata %>% filter(Year == year, Week %in% wks)
+  
+  myt_grid_sf0 <- map_grid$grid_sf %>% filter(!is.na(commune)) %>% 
+    left_join(climatedata %>% filter(Year == year), by = c("commune" = "NAME")) %>% 
+    dplyr::select(commune, all_of(x), X, Y) %>% suppressWarnings()
+  
+  expanded_grid0 <- map_grid$grid %>% filter(!is.na(commune)) %>% 
+    left_join(climatedata %>% filter(Year == year), by = c("commune" = "NAME")) %>% 
+    dplyr::select(commune, all_of(x), X, Y) %>% suppressWarnings()
+  
+  expanded_grid0 <- dplyr::select(expanded_grid0, all_of(x)) %>% sapply(min_max) %>% data.frame()
+  pred_grid_idw <- dplyr::select(df, all_of(x)) %>% sapply(min_max) %>% data.frame()
+  
+  pred_obs_dist_mat <- rdist(expanded_grid0, pred_grid_idw)
+  
+  N <- nrow(pred_obs_dist_mat)
+  pred_obs_dist_mat <- (pred_obs_dist_mat*(N-1) + 1/20)/N
+  
+  Wtilde <- FUN(theta = theta, dist_mat = pred_obs_dist_mat)
+  rm(pred_obs_dist_mat)
+  W <- Wtilde/rowSums(Wtilde)
+  
+  myt_grid_sf0$Pred <- as.numeric(W %*% df[[y]])
+  expanded_grid0$commune <- myt_grid_sf0$commune
+  expanded_grid0$Pred <- myt_grid_sf0$Pred
+  expanded_grid0$X <- myt_grid_sf0$X
+  expanded_grid0$Y <- myt_grid_sf0$Y
+  expanded_grid0$Week <- myt_grid_sf0$Week
+  # myt_grid_sf0$Ratio <- myt_grid_sf0$Pred/max(myt_grid_sf0$Pred)
+  
+  the_plot <- expanded_grid0 %>% 
+    group_by(X, Y, Week) %>% 
+    summarise(Avg_Num_eggs = mean(Pred), .groups = "drop") %>% ungroup() %>% 
+    mutate(Ratio = Avg_Num_eggs/max(count_max))
+    
+  
+  the_plot <- st_as_sf(the_plot, coords = c("X", "Y"), crs = "EPSG:4471")
+  # the_plot <- st_transform(the_plot, "+proj=longlat +ellps=WGS84 +datum=WGS84")
+  # 
+  # the_plot <- st_as_sf(the_plot, coords = c("X", "Y"),
+  #                           crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+  
+  the_plot <- st_transform(the_plot, crs = st_crs(myt_map_commune))
+  the_plot <- bind_cols(the_plot, st_coordinates(the_plot))
+  
+  
+  the_plot0 <- the_plot %>% 
+    ggplot() + geom_tile(aes(X, Y, fill = Ratio)) +
+      scale_fill_gradient2(low = "green", mid = "darkorange", high = "red", midpoint = 0.5) + #mean(the_plot$Ratio)
+      geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 0.1) +
+      theme_map() + facet_wrap(~Week)
+
+  the_plot0$labels$fill <- paste0(the_plot0$labels$fill, "\n", year)
+  
+  list(
+    GridPred = myt_grid_sf0, 
+    Plot = the_plot0
+  )
+}
+
+# other version of the get_prediction function adapted for adult mosquito data
+get_predictions2 <- function(year = 2018, theta = 5, FUN = Wt_IDW){
+  myt_grid_sf0 <- myt_grid_sf %>%
+    left_join(adult_mosquito_week %>% filter(Year == year) %>% dplyr::select(-X, -Y),
+              by = "commune") 
+  
+  expanded_grid0 <- expanded_grid %>%
+    left_join(adult_mosquito_week %>% filter(Year == year) %>% dplyr::select(-X, -Y),
+              by = "commune") 
+  
+  myt_grid_sf0 <- bind_cols(myt_grid_sf0, st_coordinates(myt_grid_sf0))
+  
+  expanded_grid0 <- expanded_grid0 %>% rename(X = Longitude, Y = Latitude) %>% 
+    dplyr::select(-Year, -d, -com, -commune, -Num_adult) %>% 
+    sapply(min_max) %>% data.frame()
+  
+  pred_grid_idw <- adult_mosquito_week %>% filter(Year == year) %>%
+    dplyr::select(-Year, -Num_adult, -d, -com, -commune) %>% 
+    sapply(min_max) %>% data.frame() %>% 
+    dplyr::select(names(expanded_grid0))
+  
+  pred_obs_dist_mat <- rdist(expanded_grid0, pred_grid_idw)
+  
+  N <- nrow(pred_obs_dist_mat)
+  pred_obs_dist_mat <- (pred_obs_dist_mat*(N-1) + 1/20)/N
+  
+  Wt_IDW <- function(theta, dist_mat) 1/dist_mat^theta
+  Wtilde <- FUN(theta = theta, dist_mat = pred_obs_dist_mat)
+  
+  Wtilde_rsums <- rowSums(Wtilde)
+  W <- Wtilde/Wtilde_rsums
+  
+  myt_grid_sf0$Num_adult_pred <- as.numeric(W %*% adult_mosquito_week$Num_adult[adult_mosquito_week$Year==year])
+  myt_grid_sf0$Ratio_adult=myt_grid_sf0$Num_adult_pred/max(myt_grid_sf0$Num_adult_pred)
+  
+  the_plot <- myt_grid_sf0 %>% ggplot() + geom_tile(aes(X, Y, fill = Ratio_adult)) + 
+    scale_fill_gradient2(low = "green", mid = "darkorange", high = "red", 
+                         midpoint = max(myt_grid_sf0$Ratio_adult)/2) + 
+    geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 0.1) +
+    theme_map() + facet_wrap(~Week)
+  the_plot$labels$fill <- paste0("Predicted\nAdult ", year)
+  
+  list(
+    GridPred = myt_grid_sf0,
+    Plot = the_plot
+  )
+}
+
+# function that does the Winsorization
+correct_outliers <- function(x, method = "winsorization"){
+  outliers <- boxplot(x, plot = FALSE)$out
+  if (method == "winsorization"){
+    x[x %in% outliers] <- sp_func(x[!x %in% outliers], fun = max)
+  }
+  x
+}
+
+
+
+# determine the growth (change in time)
+growth <- function(x, percent = TRUE) {
+  p <- ifelse(percent, 100, 1)
+  p*(x - lag(x))/x
+}
+
+
+box_cox_transform <- function(x, lambda){
+  if(lambda == 0){
+    trans <- log(x)
+  } else {
+    trans <- (x^lambda-1)/lambda
+  }
+  trans
+}
+
+
+daterange <- function(start_date, end_date, by = "day"){
+  date1 <- as.Date(start_date)
+  date2 <- as.Date(end_date)
+  y1 <- year(date1)
+  y2 <- year(date2)
+  
+  df <- data.frame(
+    Date = seq.Date(as.Date(paste0(y1, "-01-01")),
+                    as.Date(paste0(y2, "-12-21")), by = "day")) %>% 
+      mutate(Year = year(Date) %>% as.factor(),
+             Week = week(Date)
+  )
+  df
+}
+
+
+# function that will add missing dates
+get_daily_data <- function(observed_df, add = NULL){
+  add %>% 
+    lapply(function(commune){
+      observed_df$commune <- commune
+      observed_df
+    }) %>% bind_rows()
+}
+
+get_ratio <- function(x, method = 1, threshold = NULL){
+  n <- length(x)
+  
+  if (is.null(threshold)) threshold = max(x)
+  
+  if (n <= 1) {
+      stop("x should be of length greater than 1!")
+    } else {
+    return(ifelse(x <= threshold, (x-min(x))/(threshold-min(x)), 1))
+  }
+}
+
+```
+
+\section{Spatial pointtern analysis: modeling with a marked point process and quadrat analyis}
+
+## marked point process: mark = magnitude
+```{r}
+#library(rapt)
+library(spatstat)
+myppp=ppp(basemayotte$Longitude,basemayotte$Latitude,xrange=c(min(basemayotte$Longitude),max(basemayotte$Longitude)),yrange=c(min(basemayotte$Latitude),max(basemayotte$Latitude)),marks = basemayotte$Magnitude)
+plot(myppp,main="")
+#The overall distribution
+```
+
+
+
+#Explorying the  Inhomogenous intensity 
+
+```{r}
+library(spatstat)
+
+# Filtrer les données pour l'année 2018
+basemayotte_2018 <- subset(basemayotte, Year == 2019)
+
+# Créer un objet ppp
+myppp_2018 <- ppp(
+  x = basemayotte_2018$Longitude,
+  y = basemayotte_2018$Latitude,
+  xrange = c(min(basemayotte_2018$Longitude), max(basemayotte_2018$Longitude)),
+  yrange = c(min(basemayotte_2018$Latitude), max(basemayotte_2018$Latitude)),
+  marks = basemayotte_2018$Magnitude
+)
+
+# Visualiser les points
+plot(myppp_2018, main="Earthquake epicenters 2018")
+
+# Calculer un sigma adapté avec bw.diggle
+sigma_2018 <- 0.15
+
+# Estimer l'intensité inhomogène
+den_2018 <- density(myppp_2018, sigma = sigma_2018)
+
+# Tracer la densité avec ce dégradé
+plot(den_2018, main="Estimated inhomogeneous intensity - 2018")
+
+```
+
+```{r}
+library(spatstat)
+
+# Filtrer les données pour l'année 2018
+basemayotte_2018 <- subset(basemayotte, Year == 2018)
+
+# Définir la zone d'étude (rectangle englobant tous les séismes)
+xrange_vals <- range(basemayotte_2018$Longitude)
+yrange_vals <- range(basemayotte_2018$Latitude)
+
+# Créer l'objet ppp
+myppp_2018 <- ppp(
+  x = basemayotte_2018$Longitude,
+  y = basemayotte_2018$Latitude,
+  xrange = xrange_vals,
+  yrange = yrange_vals,
+  marks = basemayotte_2018$Magnitude
+)
+
+# Tracer les points avec axes et rectangle de délimitation
+plot(myppp_2018, main="Earthquake epicenters 2018",
+     xlab="Longitude", ylab="Latitude", pch=16, cex=0.7)
+# Ajouter rectangle de délimitation
+box()
+
+# Estimer l'intensité inhomogène avec sigma ajusté
+sigma_val <- 0.15
+den_2018 <- density(myppp_2018, sigma = sigma_val)
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Tracer la densité avec la zone délimitée
+plot(den_2018, main="Estimated inhomogeneous intensity - 2018",
+     xlab="Longitude", ylab="Latitude", col=colormap(128))
+# Ajouter rectangle de délimitation
+box()
+
+```
+
+```{r}
+# Packages nécessaires
+library(spatstat)
+library(maps)       # pour la carte de Mayotte
+library(mapdata)    # cartes détaillées si disponible
+
+# Filtrer les données pour 2018
+basemayotte_2018 <- subset(basemayotte, Year == 2018)
+
+# Définir la zone d'étude
+xrange_vals <- range(basemayotte_2018$Longitude)
+yrange_vals <- range(basemayotte_2018$Latitude)
+
+# Créer l'objet ppp
+myppp_2018 <- ppp(
+  x = basemayotte_2018$Longitude,
+  y = basemayotte_2018$Latitude,
+  xrange = xrange_vals,
+  yrange = yrange_vals,
+  marks = basemayotte_2018$Magnitude
+)
+
+# Estimer l'intensité inhomogène
+sigma_val <- 0.15
+den_2018 <- density(myppp_2018, sigma = sigma_val)
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Tracer la carte de Mayotte en fond
+map("worldHires", "Comoros", xlim=xrange_vals + c(-0.05, 0.05),
+    ylim=yrange_vals + c(-0.05, 0.05), col="lightgray", fill=TRUE, bg="white", mar=c(4,4,2,2))
+title("Seismic activity and estimated density - Mayotte 2018")
+# Ajouter points des séismes
+points(myppp_2018$x, myppp_2018$y, pch=16, col="blue", cex=0.7)
+
+# Ajouter la densité lissée en transparence
+plot(den_2018, add=TRUE, col=colormap(128), main="", xlab="Longitude", ylab="Latitude")
+box()  # délimitation
+
+# Ajouter légende pour la densité
+legend("topright", legend=c("Low density", "High density"), fill=c("green","red"), border=NA, bty="n")
+
+```
+
+```{r}
+library(spatstat)
+
+# Filtrer les données pour 2018
+basemayotte_2018 <- subset(basemayotte, Year == 2018)
+
+# Définir la zone d'étude avec marge
+xrange_vals <- range(basemayotte_2018$Longitude) + c(-0.05, 0.05)
+yrange_vals <- range(basemayotte_2018$Latitude) + c(-0.05, 0.05)
+
+# Créer l'objet ppp
+myppp_2018 <- ppp(
+  x = basemayotte_2018$Longitude,
+  y = basemayotte_2018$Latitude,
+  xrange = xrange_vals,
+  yrange = yrange_vals,
+  marks = basemayotte_2018$Magnitude
+)
+
+# Estimer l'intensité inhomogène
+sigma_val <- 0.15
+den_2018 <- density(myppp_2018, sigma = sigma_val)
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Tracer un fond simple : rectangle représentant la zone
+plot(0, type="n", xlim=xrange_vals, ylim=yrange_vals,
+     xlab="Longitude", ylab="Latitude", main="Seismic activity and estimated density - Mayotte 2018")
+rect(xleft=xrange_vals[1], ybottom=yrange_vals[1], xright=xrange_vals[2], ytop=yrange_vals[2], border="gray80", lwd=2)
+
+# Ajouter la densité lissée
+plot(den_2018, add=TRUE, col=colormap(128), main="")
+
+# Ajouter les points des séismes
+points(myppp_2018$x, myppp_2018$y, pch=16, col="blue", cex=0.7)
+
+# Ajouter légende pour la densité
+legend("topright", legend=c("Low density", "High density"), fill=c("green","red"), border=NA, bty="n")
+
+```
+
+```{r}
+library(spatstat)
+
+# Filtrer les données pour 2018
+basemayotte_2018 <- subset(basemayotte, Year == 2018)
+
+# Définir la zone d'étude avec une petite marge
+xrange_vals <- range(basemayotte_2018$Longitude) + c(-0.05, 0.05)
+yrange_vals <- range(basemayotte_2018$Latitude) + c(-0.05, 0.05)
+
+# Créer l'objet ppp
+myppp_2018 <- ppp(
+  x = basemayotte_2018$Longitude,
+  y = basemayotte_2018$Latitude,
+  xrange = xrange_vals,
+  yrange = yrange_vals,
+  marks = basemayotte_2018$Magnitude
+)
+
+# Estimer l'intensité inhomogène avec sigma adapté
+sigma_val <- 0.15
+den_2018 <- density(myppp_2018, sigma = sigma_val)
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Tracer la densité seule
+plot(0, type="n", xlim=xrange_vals, ylim=yrange_vals,
+     xlab="Longitude", ylab="Latitude",
+     main="Estimated inhomogeneous intensity - Mayotte 2018")
+
+# Ajouter la densité lissée
+plot(den_2018, add=TRUE, col=colormap(128), main="")
+
+# Ajouter cadre de la zone
+rect(xleft=xrange_vals[1], ybottom=yrange_vals[1], 
+     xright=xrange_vals[2], ytop=yrange_vals[2], 
+     border="gray50", lwd=2)
+
+# Légende pour la densité
+legend("topright", legend=c("High density"), 
+       fill=c("red"), border=NA, bty="n")
+
+```
+```{r}
+library(spatstat)
+
+# Filtrer les données pour 2018
+basemayotte_2018 <- subset(basemayotte, Year == 2018)
+
+# Définir la zone d'étude avec une petite marge
+xrange_vals <- range(basemayotte_2018$Longitude) + c(-0.05, 0.05)
+yrange_vals <- range(basemayotte_2018$Latitude) + c(-0.05, 0.05)
+
+# Créer l'objet ppp
+myppp_2018 <- ppp(
+  x = basemayotte_2018$Longitude,
+  y = basemayotte_2018$Latitude,
+  xrange = xrange_vals,
+  yrange = yrange_vals,
+  marks = basemayotte_2018$Magnitude
+)
+
+# Estimer l'intensité inhomogène avec sigma adapté
+sigma_val <- 0.15
+den_2018 <- density(myppp_2018, sigma = sigma_val)
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Tracer la densité seule
+plot(0, type="n", xlim=xrange_vals, ylim=yrange_vals,
+     xlab="Longitude", ylab="Latitude",
+     main="Estimated inhomogeneous intensity - Mayotte 2018")
+
+# Ajouter la densité lissée
+plot(den_2018, add=TRUE, col=colormap(128), main="")
+
+# Légende pour la densité
+legend("topright", legend=c("High density"), 
+       fill=c("red"), border=NA, bty="n")
+
+```
+
+```{r}
+library(spatstat)
+
+# Liste des années
+years <- 2018:2025
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Nom du fichier PDF
+pdf("Seismic_density_Mayotte_2018_2025.pdf", width=8, height=6)
+
+for (yr in years) {
+  
+  # Filtrer les données pour l'année
+  basemayotte_year <- subset(basemayotte, Year == yr)
+  
+  if (nrow(basemayotte_year) == 0) {
+    warning(paste("Pas de données pour l'année", yr))
+    next
+  }
+  
+  # Définir la zone d'étude avec petite marge
+  xrange_vals <- range(basemayotte_year$Longitude) + c(-0.05, 0.05)
+  yrange_vals <- range(basemayotte_year$Latitude) + c(-0.05, 0.05)
+  
+  # Créer l'objet ppp
+  myppp_year <- ppp(
+    x = basemayotte_year$Longitude,
+    y = basemayotte_year$Latitude,
+    xrange = xrange_vals,
+    yrange = yrange_vals,
+    marks = basemayotte_year$Magnitude
+  )
+  
+  # Estimer l'intensité inhomogène
+  sigma_val <- 0.15
+  den_year <- density(myppp_year, sigma = sigma_val)
+  
+  # Tracer la densité seule
+  plot(0, type="n", xlim=xrange_vals, ylim=yrange_vals,
+       xlab="Longitude", ylab="Latitude",
+       main=paste("Estimated inhomogeneous intensity - Mayotte", yr))
+  
+  # Ajouter la densité lissée
+  plot(den_year, add=TRUE, col=colormap(128), main="")
+  
+  # Ajouter légende
+  legend("topright", legend=c("High density"), fill=c("red"), border=NA, bty="n")
+}
+
+
+```
+
+
+```{r}
+library(spatstat)
+library(sf)
+library(raster)
+
+# Lire le shapefile de Mayotte
+mayotte_sf <- st_read("myt_contour.shp")  # à adapter si le fichier est ailleurs
+
+# Transformer en objet owin (window) pour spatstat
+mayotte_owin <- as.owin(st_geometry(mayotte_sf))
+
+# Liste des années
+years <- 2018:2025
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Nom du PDF
+pdf("Seismic_density_Mayotte_2018_2025_contour.pdf", width=8, height=6)
+
+for (yr in years) {
+  
+  # Filtrer les données pour l'année
+  basemayotte_year <- subset(basemayotte, Year == yr)
+  
+  if (nrow(basemayotte_year) == 0) {
+    warning(paste("Pas de données pour l'année", yr))
+    next
+  }
+  
+  # Créer l'objet ppp en limitant à la fenêtre (contour de Mayotte)
+  myppp_year <- ppp(
+    x = basemayotte_year$Longitude,
+    y = basemayotte_year$Latitude,
+    window = mayotte_owin,
+    marks = basemayotte_year$Magnitude
+  )
+  
+  # Estimer l'intensité inhomogène
+  sigma_val <- 0.015  # Ajuster si nécessaire pour la résolution
+  den_year <- density(myppp_year, sigma = sigma_val, at="pixels")
+  
+  # Tracer la densité limitée au contour
+  plot(0, type="n", xlim=mayotte_owin$xrange, ylim=mayotte_owin$yrange,
+       xlab="Longitude", ylab="Latitude",
+       main=paste("Estimated inhomogeneous intensity - Mayotte", yr))
+  
+  # Ajouter la densité lissée
+  plot(den_year, add=TRUE, col=colormap(128), main="")
+  
+  # Ajouter le contour de Mayotte
+  plot(mayotte_owin, add=TRUE, border="black", lwd=2)
+  
+  # Légende
+  legend("topright", legend=c("High density"), fill=c("red"), border=NA, bty="n")
+}
+
+
+
+```
+
+
+```{r}
+library(spatstat)
+
+# Liste des années
+years <- 2018:2025
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Nom du fichier PDF
+pdf("Seismic_density_Mayotte_2018_2025.pdf", width=16, height=8)  # largeur × hauteur adaptée
+
+# Disposition 2 lignes × 4 colonnes
+par(mfrow=c(2,4), mar=c(4,4,3,1))  # marges ajustées
+
+for (yr in years) {
+  
+  # Filtrer les données pour l'année
+  basemayotte_year <- subset(basemayotte, Year == yr)
+  
+  if (nrow(basemayotte_year) == 0) {
+    warning(paste("Pas de données pour l'année", yr))
+    next
+  }
+  
+  # Définir la zone d'étude avec petite marge
+  xrange_vals <- range(basemayotte_year$Longitude) + c(-0.05, 0.05)
+  yrange_vals <- range(basemayotte_year$Latitude) + c(-0.05, 0.05)
+  
+  # Créer l'objet ppp
+  myppp_year <- ppp(
+    x = basemayotte_year$Longitude,
+    y = basemayotte_year$Latitude,
+    xrange = xrange_vals,
+    yrange = yrange_vals,
+    marks = basemayotte_year$Magnitude
+  )
+  
+  # Estimer l'intensité inhomogène
+  sigma_val <- 0.15
+  den_year <- density(myppp_year, sigma = sigma_val)
+  
+  # Tracer la densité seule
+  plot(0, type="n", xlim=xrange_vals, ylim=yrange_vals,
+       xlab="Longitude", ylab="Latitude",
+       main=paste("Mayotte", yr))
+  
+  # Ajouter la densité lissée
+  plot(den_year, add=TRUE, col=colormap(128), main="")
+  
+  # Ajouter légende (optionnel : seulement pour la première figure)
+  if (yr == years[1]) {
+    legend("topright", legend=c("High density"), fill=c("red"), border=NA, bty="n")
+  }
+}
+
+dev.off()
+
+```
+```{r}
+library(spatstat)
+
+# Liste des années
+years <- 2018:2025
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# Nom du fichier PDF
+pdf("Seismic_density_Mayotte_2018_2025.pdf", width=16, height=8)  # largeur × hauteur adaptée
+
+# Disposition 2 lignes × 4 colonnes
+par(mfrow=c(2,4), mar=c(4,4,3,1))  # marges ajustées
+
+for (yr in years) {
+  
+  # Filtrer les données pour l'année
+  basemayotte_year <- subset(basemayotte, Year == yr)
+  
+  if (nrow(basemayotte_year) == 0) {
+    warning(paste("Pas de données pour l'année", yr))
+    next
+  }
+  
+  # Définir la zone d'étude avec petite marge
+  xrange_vals <- range(basemayotte_year$Longitude) + c(-0.05, 0.05)
+  yrange_vals <- range(basemayotte_year$Latitude) + c(-0.05, 0.05)
+  
+  # Créer l'objet ppp
+  myppp_year <- ppp(
+    x = basemayotte_year$Longitude,
+    y = basemayotte_year$Latitude,
+    xrange = xrange_vals,
+    yrange = yrange_vals,
+    marks = basemayotte_year$Magnitude
+  )
+  
+  # Estimer l'intensité inhomogène
+  sigma_val <- 0.15
+  den_year <- density(myppp_year, sigma = sigma_val)
+  
+  # Tracer la densité seule
+  plot(0, type="n", xlim=xrange_vals, ylim=yrange_vals,
+       xlab="Longitude", ylab="Latitude",
+       main=as.character(yr))
+  
+  # Ajouter la densité lissée
+  plot(den_year, add=TRUE, col=colormap(128), main="")
+  
+  # Ajouter légende (optionnel : seulement pour la première figure)
+  if (yr == years[1]) {
+    legend("topright", legend=c("High density"), fill=c("red"), border=NA, bty="n")
+  }
+}
+
+dev.off()
+
+```
+
+```{r}
+library(spatstat)
+library(sf)
+library(dplyr)
+
+# Convertir le shapefile en owin
+mayotte_owin <- as.owin(myt_contour)
+
+# Liste des années
+years <- 2018:2025
+
+# Dégradé vert → rouge
+colormap <- colorRampPalette(c("green", "yellow", "red"))
+
+# PDF de sortie
+pdf("Seismic_density_Mayotte_2018_2025_contour.pdf", width=8, height=6)
+
+for (yr in years) {
+  
+  # Filtrer les données pour l'année
+  basemayotte_year <- basemayottedf %>% filter(Year == yr)
+  
+  if (nrow(basemayotte_year) == 0) next
+  
+  # Créer l'objet ppp avec coordonnées projetées
+  myppp_year <- ppp(
+    x = basemayotte_year$X,
+    y = basemayotte_year$Y,
+    window = mayotte_owin,
+    marks = basemayotte_year$Magnitude
+  )
+  
+  # Estimer la densité inhomogène
+  sigma_val <- 0.015
+  den_year <- density(myppp_year, sigma = sigma_val, at="pixels")
+  
+  # Tracer la densité
+  plot(0, type="n", xlim=mayotte_owin$xrange, ylim=mayotte_owin$yrange,
+       xlab="Longitude", ylab="Latitude",
+       main=paste("Estimated inhomogeneous intensity - Mayotte", yr))
+  
+  plot(den_year, add=TRUE, col=colormap(128))
+  
+  # Ajouter le contour de Mayotte
+  plot(mayotte_owin, add=TRUE, border="black", lwd=2)
+  
+  # Légende
+  legend("topright", legend="High density", fill="red", border=NA, bty="n")
+}
+
+```
+
