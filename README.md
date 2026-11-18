@@ -242,3 +242,5 @@ If you encounter an issue while using the dashboard:
 **🌋 Developed for the statistical exploration, visualization, and spatio-temporal analysis of seismic activity associated with the Fani Maoré submarine volcano**
 
 *Application scientifique dédiée à la compréhension de l'activité sismique volcanique sous-marine*
+**🌋 Diffusion de la culture scientifique : https://www.calameo.com/read/008256696771f459c63b7
+
